@@ -171,38 +171,60 @@ def _port_and_reg_offset(ch: int) -> tuple[int, int]:
     return 1, ch - 3
 
 
-def _write_patch(stream: _VgmStream, ch: int, patch: Ym2612Patch) -> None:
-    """Emit all YM2612 register writes to program an FM patch on *ch*."""
+def _write_patch(stream: _VgmStream, ch: int, patch: Ym2612Patch,
+                 prev: 'Ym2612Patch | None' = None) -> None:
+    """Emit YM2612 register writes to program an FM patch on *ch*.
+
+    When *prev* is supplied only registers whose values changed are written,
+    avoiding unnecessary operator-envelope resets between notes of the same
+    instrument (e.g. pan-only changes no longer trigger 26 register rewrites).
+    """
     port, offset = _port_and_reg_offset(ch)
 
-    # Algorithm and feedback
-    stream.write_ym2612(port, 0xB0 + offset,
-                        ((patch.feedback & 0x07) << 3) | (patch.algorithm & 0x07))
+    # Algorithm and feedback (0xB0)
+    b0 = ((patch.feedback & 0x07) << 3) | (patch.algorithm & 0x07)
+    if prev is None or (((prev.feedback & 0x07) << 3) | (prev.algorithm & 0x07)) != b0:
+        stream.write_ym2612(port, 0xB0 + offset, b0)
 
-    # Stereo (LR) / AMS / FMS — preserve original panning, default to both if absent
-    pan = getattr(patch, 'pan', 3)
-    stream.write_ym2612(port, 0xB4 + offset,
-                        ((pan & 0x03) << 6) | ((patch.ams & 0x03) << 4) | (patch.fms & 0x07))
+    # Stereo (LR) / AMS / FMS (0xB4)
+    pan      = getattr(patch, 'pan', 3)
+    prev_pan = getattr(prev,  'pan', 3) if prev is not None else None
+    b4 = ((pan & 0x03) << 6) | ((patch.ams & 0x03) << 4) | (patch.fms & 0x07)
+    if prev is None or (((prev_pan & 0x03) << 6) | ((prev.ams & 0x03) << 4) | (prev.fms & 0x07)) != b4:
+        stream.write_ym2612(port, 0xB4 + offset, b4)
 
     # Per-operator registers
     for op_idx in range(4):
-        slot = _OP_TO_SLOT[op_idx]          # physical slot
-        slot_offset = slot * 4              # distance between slots in reg space
+        slot = _OP_TO_SLOT[op_idx]
+        slot_offset = slot * 4
 
-        stream.write_ym2612(port, 0x30 + offset + slot_offset,
-                            ((patch.dt[op_idx] & 0x07) << 4) | (patch.mul[op_idx] & 0x0F))
-        stream.write_ym2612(port, 0x40 + offset + slot_offset,
-                            patch.tl[op_idx] & 0x7F)
-        stream.write_ym2612(port, 0x50 + offset + slot_offset,
-                            patch.ar[op_idx] & 0x1F)
-        stream.write_ym2612(port, 0x60 + offset + slot_offset,
-                            (int(patch.am_en[op_idx]) << 7) | (patch.dr[op_idx] & 0x1F))
-        stream.write_ym2612(port, 0x70 + offset + slot_offset,
-                            patch.sr[op_idx] & 0x1F)
-        stream.write_ym2612(port, 0x80 + offset + slot_offset,
-                            ((patch.sl[op_idx] & 0x0F) << 4) | (patch.rr[op_idx] & 0x0F))
-        stream.write_ym2612(port, 0x90 + offset + slot_offset,
-                            patch.ssg_eg[op_idx] & 0x0F)
+        dt_mul = ((patch.dt[op_idx] & 0x07) << 4) | (patch.mul[op_idx] & 0x0F)
+        if prev is None or (((prev.dt[op_idx] & 0x07) << 4) | (prev.mul[op_idx] & 0x0F)) != dt_mul:
+            stream.write_ym2612(port, 0x30 + offset + slot_offset, dt_mul)
+
+        tl = patch.tl[op_idx] & 0x7F
+        if prev is None or (prev.tl[op_idx] & 0x7F) != tl:
+            stream.write_ym2612(port, 0x40 + offset + slot_offset, tl)
+
+        ar = patch.ar[op_idx] & 0x1F
+        if prev is None or (prev.ar[op_idx] & 0x1F) != ar:
+            stream.write_ym2612(port, 0x50 + offset + slot_offset, ar)
+
+        dr_am = (int(patch.am_en[op_idx]) << 7) | (patch.dr[op_idx] & 0x1F)
+        if prev is None or ((int(prev.am_en[op_idx]) << 7) | (prev.dr[op_idx] & 0x1F)) != dr_am:
+            stream.write_ym2612(port, 0x60 + offset + slot_offset, dr_am)
+
+        sr = patch.sr[op_idx] & 0x1F
+        if prev is None or (prev.sr[op_idx] & 0x1F) != sr:
+            stream.write_ym2612(port, 0x70 + offset + slot_offset, sr)
+
+        sl_rr = ((patch.sl[op_idx] & 0x0F) << 4) | (patch.rr[op_idx] & 0x0F)
+        if prev is None or (((prev.sl[op_idx] & 0x0F) << 4) | (prev.rr[op_idx] & 0x0F)) != sl_rr:
+            stream.write_ym2612(port, 0x80 + offset + slot_offset, sl_rr)
+
+        ssg = patch.ssg_eg[op_idx] & 0x0F
+        if prev is None or (prev.ssg_eg[op_idx] & 0x0F) != ssg:
+            stream.write_ym2612(port, 0x90 + offset + slot_offset, ssg)
 
 
 def _write_fnumber(stream: _VgmStream, ch: int, midi: int) -> None:
@@ -416,6 +438,7 @@ def synthesise_vgm(
 
     # ---- Track which patches have been written per channel ----
     last_patch_fp: dict[int, tuple] = {}
+    last_patch: dict[int, Ym2612Patch] = {}
 
     # ---- Emit actions ----
     for action in actions:
@@ -425,8 +448,9 @@ def synthesise_vgm(
             ch, patch = action.data
             fp = patch.to_fingerprint()
             if last_patch_fp.get(ch) != fp:
-                _write_patch(stream, ch, patch)
+                _write_patch(stream, ch, patch, prev=last_patch.get(ch))
                 last_patch_fp[ch] = fp
+                last_patch[ch] = patch
 
         elif action.kind == "fm_on":
             ch, midi = action.data
