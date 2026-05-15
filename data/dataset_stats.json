@@ -1,0 +1,21 @@
+{
+  "total_files": 40,
+  "valid_files": 40,
+  "invalid_files": 0,
+  "has_ym2612": 40,
+  "has_sn76489": 19,
+  "total_duration_seconds": 1675.8699999999997,
+  "total_events": 5304536,
+  "total_ym2612_writes": 513101,
+  "files_by_duration_bucket": {
+    "0-30s": 19,
+    "30-60s": 11,
+    "60-120s": 9,
+    "120-180s": 1,
+    "180-300s": 0,
+    "300s+": 0
+  },
+  "errors": [],
+  "total_duration_hours": 0.47,
+  "avg_duration_seconds": 41.9
+}

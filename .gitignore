@@ -1,0 +1,29 @@
+# Data & artifacts
+data/zips/
+data/vgm/
+data/prepared*/
+output/
+runs/
+chroma_db/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Misc
+*.log
+.pytest_cache/

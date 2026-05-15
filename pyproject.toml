@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "genesis-music-ml"
+version = "0.1.0"
+description = "ML model for generating Sega Genesis / Mega Drive music via YM2612 register writes in VGM format"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.0",
+    "numpy>=1.24",
+    "tqdm",
+    "requests",
+    "beautifulsoup4",
+    "tensorboard",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-cov",
+    "ruff",
+]
+
+[project.scripts]
+vgm-pipeline = "genesis_music.data_pipeline:main"
+vgm-tokenizer = "genesis_music.tokenizer:main"
+vgm-dataset = "genesis_music.dataset:main"
+vgm-train = "genesis_music.train:main"
+vgm-generate = "genesis_music.generate:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/genesis_music"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
