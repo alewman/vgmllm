@@ -138,6 +138,15 @@ class Ym2612Patch:
     lfo_en:   bool = False
     lfo_rate: int  = 0     # 0–7
 
+    # CH3 special-mode per-operator F-numbers (regs 0xA8–0xAE, port 0 only).
+    # Indexed 0–2: slot 0=0xA8/0xAC, slot 1=0xA9/0xAD, slot 2=0xAA/0xAE.
+    # Slot 3 (op4) uses the normal channel F-number (fnum_lo/fnum_hi/block).
+    # Only meaningful for FM channel 3 (index 2); all zeros on other channels.
+    ch3_mode:        int   = 0               # 0=normal, 2=special (reg 0x27 bits 7:6)
+    ch3_op_fnum_lo:  tuple = (0, 0, 0)       # raw F-number low bytes
+    ch3_op_fnum_hi:  tuple = (0, 0, 0)       # F-number high nibbles (bits 10:8)
+    ch3_op_block:    tuple = (0, 0, 0)       # block values (3 bits each)
+
     def output_tl(self) -> int:
         """Total level of the output carrier operator(s).
 
@@ -152,7 +161,8 @@ class Ym2612Patch:
 
     def to_fingerprint(self) -> tuple:
         """Compact tuple for hashing/equality checks."""
-        return (self.algorithm, self.feedback, self.tl, self.ar, self.ssg_eg, self.am_en, self.pan)
+        return (self.algorithm, self.feedback, self.tl, self.ar, self.ssg_eg, self.am_en, self.pan,
+                self.ch3_mode, self.ch3_op_fnum_lo, self.ch3_op_fnum_hi, self.ch3_op_block)
 
 
 @dataclass
@@ -220,6 +230,12 @@ class _FmChannelState:
     am_en: list = field(default_factory=lambda: [False] * 4)
     ssg_eg: list = field(default_factory=lambda: [0] * 4)
 
+    # CH3 special-mode per-operator F-numbers (slot indices 0-2)
+    # Written via regs 0xA8/0xA9/0xAA (lo) and 0xAC/0xAD/0xAE (block+hi)
+    ch3_op_fnum_lo: list = field(default_factory=lambda: [0, 0, 0])
+    ch3_op_fnum_hi: list = field(default_factory=lambda: [0, 0, 0])
+    ch3_op_block:   list = field(default_factory=lambda: [0, 0, 0])
+
     # Key state
     key_on: bool = False
     key_on_sample: int = 0  # sample position when key turned on
@@ -235,7 +251,7 @@ class _FmChannelState:
         """Convert current F-Number + Block to MIDI note number."""
         return fnumber_to_midi(self.fnum, self.block)
 
-    def make_patch(self, lfo_en: bool = False, lfo_rate: int = 0) -> Ym2612Patch:
+    def make_patch(self, lfo_en: bool = False, lfo_rate: int = 0, ch3_mode: int = 0) -> Ym2612Patch:
         return Ym2612Patch(
             algorithm=self.algorithm,
             feedback=self.feedback,
@@ -254,6 +270,10 @@ class _FmChannelState:
             ssg_eg=tuple(self.ssg_eg),
             lfo_en=lfo_en,
             lfo_rate=lfo_rate,
+            ch3_mode=ch3_mode,
+            ch3_op_fnum_lo=tuple(self.ch3_op_fnum_lo),
+            ch3_op_fnum_hi=tuple(self.ch3_op_fnum_hi),
+            ch3_op_block=tuple(self.ch3_op_block),
         )
 
     def velocity_from_patch(self) -> int:
@@ -375,6 +395,7 @@ class Ym2612State:
         self.dac_enabled: bool = False
         self.lfo_enabled: bool = False
         self.lfo_rate: int = 0
+        self.ch3_mode: int = 0   # CH3 mode: 0=normal, 2=special (reg 0x27 bits 7:6)
         self._current_sample: int = 0
         # DAC onset tracking
         self._last_dac_sample_end: int = -ONSET_GAP_SAMPLES  # force first event as onset
@@ -448,8 +469,14 @@ class Ym2612State:
     @property
     def last_patches(self) -> dict[int, Ym2612Patch]:
         """Return the most recent FM patch for each channel (0-5)."""
-        return {i: ch.make_patch(lfo_en=self.lfo_enabled, lfo_rate=self.lfo_rate)
-                for i, ch in enumerate(self.channels)}
+        return {
+            i: ch.make_patch(
+                lfo_en=self.lfo_enabled,
+                lfo_rate=self.lfo_rate,
+                ch3_mode=self.ch3_mode if i == 2 else 0,
+            )
+            for i, ch in enumerate(self.channels)
+        }
 
     # ------------------------------------------------------------------
     # Internal register processing
@@ -466,6 +493,10 @@ class Ym2612State:
                 self.lfo_enabled = bool(val & 0x08)
                 self.lfo_rate = val & 0x07
                 return
+            if reg == 0x27:
+                # CH3 mode: bits 7:6 (0=normal, 2=special/CSM)
+                self.ch3_mode = (val >> 6) & 0x03
+                return
             if reg == 0x2B:
                 self.dac_enabled = bool(val & 0x80)
                 return
@@ -473,11 +504,36 @@ class Ym2612State:
                 yield from self._handle_key_on_off(val)
                 return
 
+        # ---- CH3 special-mode per-operator F-Numbers (port 0 only) ----
+        # Regs 0xA8/0xA9/0xAA: per-operator F-number low byte (slots 0/1/2)
+        # Regs 0xAC/0xAD/0xAE: per-operator block + F-number high (slots 0/1/2)
+        # Slot 3 (OP4) uses the normal CH3 F-number regs 0xA2/0xA6.
+        if port == 0 and 0xA8 <= reg <= 0xAA:
+            self.channels[2].ch3_op_fnum_lo[reg - 0xA8] = val
+            return
+        if port == 0 and 0xAC <= reg <= 0xAE:
+            slot_idx = reg - 0xAC
+            self.channels[2].ch3_op_fnum_hi[slot_idx] = val & 0x07
+            self.channels[2].ch3_op_block[slot_idx]   = (val >> 3) & 0x07
+            return
+
         # ---- Per-channel F-Number (frequency) ----
         if 0xA0 <= reg <= 0xA2:
             ch = reg - 0xA0 + ch_offset
             if 0 <= ch < 6:
                 self.channels[ch].fnum_lo = val
+                # Record mid-note pitch bend waypoint for FM channels.
+                # Writing 0xA0/0xA2 COMMITS the frequency (shadow hi+new lo).
+                # If a note is already ringing, this is a portamento/glide step.
+                # Store (sample, fnum, block) — 3-element to distinguish from
+                # PSG 2-element (sample, period) tuples in pitch_envelope.
+                ch_state = self.channels[ch]
+                if ch_state.key_on and ch_state.open_note is not None:
+                    fnum  = ch_state.fnum   # updated fnum_lo already applied above
+                    block = ch_state.block
+                    pe = ch_state.open_note.pitch_envelope
+                    if not pe or pe[-1][1] != fnum or pe[-1][2] != block:
+                        pe.append((self._current_sample, fnum, block))
             return
 
         if 0xA4 <= reg <= 0xA6:
@@ -589,7 +645,11 @@ class Ym2612State:
                 pitch     = pitch,
                 velocity  = vel,
                 sample_on = self._current_sample,
-                patch     = ch_state.make_patch(lfo_en=self.lfo_enabled, lfo_rate=self.lfo_rate),
+                patch     = ch_state.make_patch(
+                    lfo_en=self.lfo_enabled,
+                    lfo_rate=self.lfo_rate,
+                    ch3_mode=self.ch3_mode if ch == 2 else 0,
+                ),
             )
             ch_state.key_on        = True
             ch_state.key_on_sample = self._current_sample

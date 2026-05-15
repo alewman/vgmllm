@@ -226,6 +226,30 @@ def _write_patch(stream: _VgmStream, ch: int, patch: Ym2612Patch,
         if prev is None or (prev.ssg_eg[op_idx] & 0x0F) != ssg:
             stream.write_ym2612(port, 0x90 + offset + slot_offset, ssg)
 
+    # CH3 special-mode per-operator F-numbers (regs 0x27, 0xA8–0xAE)
+    # Written for every CH3 (index 2) patch write so that the per-operator
+    # F-numbers pre-loaded by composers are faithfully reproduced even when
+    # CH3 mode is 0 (the "scratch register" pre-load technique).
+    if ch == 2:
+        cur_mode = getattr(patch, 'ch3_mode', 0)
+        prev_mode = getattr(prev, 'ch3_mode', None) if prev is not None else None
+        if prev is None or prev_mode != cur_mode:
+            stream.write_ym2612(0, 0x27, (cur_mode & 0x03) << 6)
+
+        cur_lo  = getattr(patch, 'ch3_op_fnum_lo', (0, 0, 0))
+        cur_hi  = getattr(patch, 'ch3_op_fnum_hi', (0, 0, 0))
+        cur_blk = getattr(patch, 'ch3_op_block',   (0, 0, 0))
+        prev_lo  = getattr(prev, 'ch3_op_fnum_lo', (0, 0, 0)) if prev is not None else None
+        prev_hi  = getattr(prev, 'ch3_op_fnum_hi', (0, 0, 0)) if prev is not None else None
+        prev_blk = getattr(prev, 'ch3_op_block',   (0, 0, 0)) if prev is not None else None
+        for s in range(3):
+            if (prev_lo is None or prev_lo[s] != cur_lo[s]
+                    or prev_hi[s] != cur_hi[s] or prev_blk[s] != cur_blk[s]):
+                # Same shadow-register rule as 0xA4/0xA0: write hi first, then lo commits
+                stream.write_ym2612(0, 0xAC + s,
+                                    ((cur_blk[s] & 0x07) << 3) | (cur_hi[s] & 0x07))
+                stream.write_ym2612(0, 0xA8 + s, cur_lo[s] & 0xFF)
+
 
 def _write_fnumber(stream: _VgmStream, ch: int, midi: int) -> None:
     """Emit F-Number + Block register writes for a given MIDI pitch.
@@ -388,9 +412,20 @@ def synthesise_vgm(
             actions.append(_Action(sample_on,   1, "fm_on",    (ch, note.pitch)))
             actions.append(_Action(sample_off, -1, "fm_off",   (ch,)))
             # Mid-note TL envelope snapshots (TL-fade articulation technique)
+            # Exclude writes within 2 samples of note-off — only catches pure
+            # timing coincidences.  The decoder already excludes prep writes
+            # that happen after key-off, so a larger window just silently drops
+            # legitimate expression events on fast-tempo songs.
             for tl_sample, tl_snap in note.tl_envelope:
-                if sample_on < tl_sample < sample_off:
+                if sample_on < tl_sample < sample_off - 2:
                     actions.append(_Action(tl_sample, 1, "fm_tl", (ch, tl_snap)))
+            # Mid-note FM pitch bend (portamento/glide): (sample, fnum, block)
+            # 3-element tuples distinguish FM bends from PSG 2-element waypoints.
+            for wp in note.pitch_envelope:
+                if len(wp) == 3:  # FM: (sample, fnum, block)
+                    wp_sample, wp_fnum, wp_block = wp
+                    if sample_on < wp_sample < sample_off:
+                        actions.append(_Action(wp_sample, 1, "fm_bend", (ch, wp_fnum, wp_block)))
 
         elif ch == CH_DAC:
             if dac_stream is None:  # only use NoteEvent DAC if no verbatim stream provided
@@ -423,8 +458,25 @@ def synthesise_vgm(
     # Sort by (sample, priority)
     actions.sort()
 
-    # ---- Track FM DAC mode ----
-    dac_enabled = any(a.kind in ("dac_hit", "dac_seek", "dac_write") for a in actions)
+    # ---- Inject DAC enable/disable state transitions -------------------------
+    # Toggling 0x2B dynamically (enable before DAC events, disable before FM
+    # ch-5 note-ons) prevents the DAC from permanently silencing FM channel 6
+    # for the rest of the track after the first drum hit.
+    _DAC_ACTION_KINDS = ("dac_hit", "dac_seek", "dac_write")
+    dac_transitions: list[_Action] = []
+    _cur_dac = False  # YM2612 hardware starts with DAC disabled
+    for _a in actions:
+        if _a.kind in _DAC_ACTION_KINDS:
+            if not _cur_dac:
+                dac_transitions.append(_Action(_a.sample, -2, "dac_mode", True))
+                _cur_dac = True
+        elif _a.kind == "fm_on" and _a.data[0] == 5:  # FM channel 6 (index 5)
+            if _cur_dac:
+                dac_transitions.append(_Action(_a.sample, -2, "dac_mode", False))
+                _cur_dac = False
+    if dac_transitions:
+        actions.extend(dac_transitions)
+        actions.sort()
 
     # ---- LFO: enable if any patch uses it, using that patch's rate ----
     lfo_patch = next(
@@ -435,10 +487,6 @@ def synthesise_vgm(
         stream.write_ym2612(0, 0x22, 0x08 | (lfo_patch.lfo_rate & 0x07))
     else:
         stream.write_ym2612(0, 0x22, 0x00)  # LFO off
-
-    # ---- Enable DAC if needed ----
-    if dac_enabled:
-        stream.write_ym2612(0, 0x2B, 0x80)  # DAC enable
 
     # ---- Track which patches have been written per channel ----
     last_patch_fp: dict[int, tuple] = {}
@@ -488,6 +536,21 @@ def synthesise_vgm(
             if cur_patch is not None:
                 from dataclasses import replace as _dc_replace
                 last_patch[ch] = _dc_replace(cur_patch, tl=tuple(tl_snap))
+
+        elif action.kind == "fm_bend":
+            # Mid-note F-number update (portamento/glide step).
+            # Write hi (shadow) then lo (commit) — same order as _write_fnumber.
+            ch, fnum, block = action.data
+            port, offset = _port_and_reg_offset(ch)
+            stream.write_ym2612(port, 0xA4 + offset,
+                                ((block & 0x07) << 3) | ((fnum >> 8) & 0x07))
+            stream.write_ym2612(port, 0xA0 + offset, fnum & 0xFF)
+            # Keep last_midi in sync so subsequent note-on doesn't skip fnum write
+            from genesis_music.ym2612 import fnumber_to_midi as _f2m
+            last_midi[ch] = _f2m(fnum, block)
+
+        elif action.kind == "dac_mode":
+            stream.write_ym2612(0, 0x2B, 0x80 if action.data else 0x00)
 
         elif action.kind == "dac_hit":
             (slot,) = action.data
