@@ -387,6 +387,10 @@ def synthesise_vgm(
                 actions.append(_Action(sample_on,  0, "fm_patch", (ch, patch)))
             actions.append(_Action(sample_on,   1, "fm_on",    (ch, note.pitch)))
             actions.append(_Action(sample_off, -1, "fm_off",   (ch,)))
+            # Mid-note TL envelope snapshots (TL-fade articulation technique)
+            for tl_sample, tl_snap in note.tl_envelope:
+                if sample_on < tl_sample < sample_off:
+                    actions.append(_Action(tl_sample, 1, "fm_tl", (ch, tl_snap)))
 
         elif ch == CH_DAC:
             if dac_stream is None:  # only use NoteEvent DAC if no verbatim stream provided
@@ -467,6 +471,23 @@ def synthesise_vgm(
         elif action.kind == "fm_off":
             (ch,) = action.data
             _write_key_off(stream, ch)
+
+        elif action.kind == "fm_tl":
+            # Mid-note TL envelope: write only operators whose TL value changed
+            # relative to the current patch state for this channel.
+            ch, tl_snap = action.data
+            port, offset = _port_and_reg_offset(ch)
+            cur_patch = last_patch.get(ch)
+            for op_idx in range(4):
+                tl = tl_snap[op_idx] & 0x7F
+                prev_tl = (cur_patch.tl[op_idx] & 0x7F) if cur_patch else -1
+                if tl != prev_tl:
+                    slot = _OP_TO_SLOT[op_idx]
+                    stream.write_ym2612(port, 0x40 + offset + slot * 4, tl)
+            # Update last_patch TL so subsequent diff writes are correct
+            if cur_patch is not None:
+                from dataclasses import replace as _dc_replace
+                last_patch[ch] = _dc_replace(cur_patch, tl=tuple(tl_snap))
 
         elif action.kind == "dac_hit":
             (slot,) = action.data

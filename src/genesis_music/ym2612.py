@@ -174,6 +174,12 @@ class NoteEvent:
     # Empty for most notes; non-empty when pitch changes while the note is held.
     pitch_envelope: list = field(default_factory=list)
 
+    # For FM channels: list of (absolute_sample, [tl0, tl1, tl2, tl3]) snapshots
+    # capturing mid-note TL (Total Level) register changes.  These are used by
+    # game music composers to shape note decay/articulation without using key-off
+    # (the "TL-fade envelope" technique).  Empty for most notes.
+    tl_envelope: list = field(default_factory=list)
+
     @property
     def duration_samples(self) -> int:
         if self.sample_off < 0:
@@ -515,11 +521,18 @@ class Ym2612State:
                 self.channels[ch].dt[op]  = (val >> 4) & 0x07
             elif base == 0x40:
                 self.channels[ch].tl[op] = val & 0x7F
-                # Synthetic Key Off: if all carrier operators are now at or
-                # above TL_SILENCE_THRESHOLD the voice is perceptually silent
-                # even though no 0x28 Key Off was issued (TL-fade technique).
                 ch_state = self.channels[ch]
                 if ch_state.key_on and ch_state.open_note is not None:
+                    # Record mid-note TL snapshot for tl_envelope replay.
+                    # Append whenever TL changes while a note is open; the synth
+                    # will re-emit these writes at the correct sample positions.
+                    tl_snap = list(ch_state.tl)  # copy all 4 ops
+                    tl_env = ch_state.open_note.tl_envelope
+                    if not tl_env or tl_env[-1][1] != tl_snap:
+                        tl_env.append((self._current_sample, tl_snap))
+                    # Synthetic Key Off: if all carrier operators are now at or
+                    # above TL_SILENCE_THRESHOLD the voice is perceptually silent
+                    # even though no 0x28 Key Off was issued (TL-fade technique).
                     carriers = _carrier_ops(ch_state.algorithm)
                     if all(ch_state.tl[c] >= TL_SILENCE_THRESHOLD
                            for c in carriers):
