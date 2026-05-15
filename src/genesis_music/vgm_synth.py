@@ -439,6 +439,7 @@ def synthesise_vgm(
     # ---- Track which patches have been written per channel ----
     last_patch_fp: dict[int, tuple] = {}
     last_patch: dict[int, Ym2612Patch] = {}
+    last_midi: dict[int, int] = {}  # last F-num written per FM channel
 
     # ---- Emit actions ----
     for action in actions:
@@ -455,7 +456,12 @@ def synthesise_vgm(
         elif action.kind == "fm_on":
             ch, midi = action.data
             if midi >= 0:
-                _write_fnumber(stream, ch, midi)
+                # Only write F-number when pitch changes — avoids 0xA0 commit
+                # glitch (disturbs EG state) on same-pitch retriggers, matching
+                # how the original VGM handles rapid repeated notes.
+                if last_midi.get(ch) != midi:
+                    _write_fnumber(stream, ch, midi)
+                    last_midi[ch] = midi
                 _write_key_on(stream, ch)
 
         elif action.kind == "fm_off":
