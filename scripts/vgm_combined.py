@@ -449,8 +449,8 @@ def _prepare(args, vgm_path: Path):
     """
     # ── 1. Parse notes (no pygame needed) ─────────────────────────────────────
     print(f"Loading {vgm_path.name} …")
-    rects, total_sec = _parse_notes(vgm_path)
-    print(f"  {len(rects)} note events, {total_sec:.1f}s")
+    rects, total_sec, t_loop_start = _parse_notes(vgm_path)
+    print(f"  {len(rects)} note events, {total_sec:.1f}s  loop@{t_loop_start:.1f}s")
 
     pitched = [r for r in rects if r.pitch >= 0 and r.channel != CH_DAC]
     if not pitched:
@@ -528,7 +528,7 @@ def _prepare(args, vgm_path: Path):
     font_key  = pygame.font.SysFont("monospace", 10)
 
     return (
-        rects, total_sec,
+        rects, total_sec, t_loop_start,
         pitch_min, pitch_max, min_white, n_whites,
         white_w, black_w, piano_x0, DAC_STRIP_W,
         channels, mix_wav, sample_rate,
@@ -542,7 +542,7 @@ def _prepare(args, vgm_path: Path):
 
 def _interactive(
     args, vgm_path,
-    rects, total_sec,
+    rects, total_sec, t_loop_start,
     pitch_min, pitch_max, min_white, n_whites,
     white_w, black_w, piano_x0, dac_strip_w,
     channels, mix_wav, sample_rate,
@@ -569,6 +569,8 @@ def _interactive(
     t_end     = total_sec + 1.0
     paused    = False
 
+    has_loop = t_loop_start > 0.0
+
     def _start_audio_at(pos_sec: float) -> None:
         if not has_audio:
             return
@@ -579,6 +581,8 @@ def _interactive(
     _start_audio_at(t)
     audio_started = t >= 0
 
+    if has_loop:
+        print(f"Loop point: {t_loop_start:.2f}s (loop body {total_sec - t_loop_start:.2f}s)")
     print("Controls: SPACE=pause  LEFT/RIGHT=seek 5s  Q/ESC=quit")
 
     while True:
@@ -624,11 +628,10 @@ def _interactive(
             clock.tick(30)
 
         if t >= t_end:
-            # loop back to pre-roll
-            t = -args.lookahead
-            audio_started = False
-            if has_audio:
-                pygame.mixer.music.stop()
+            # Seamless loop: jump to the VGM loop point (not back to pre-roll)
+            t = t_loop_start
+            _start_audio_at(t_loop_start)
+            audio_started = True
 
         pos_sample = int(max(t, 0.0) * sample_rate)
         vgm_pos    = int(pos_sample * VGM_RATE / sample_rate)
@@ -775,7 +778,7 @@ def main() -> None:
         sys.exit(f"File not found: {vgm_path}")
 
     (
-        rects, total_sec,
+        rects, total_sec, t_loop_start,
         pitch_min, pitch_max, min_white, n_whites,
         white_w, black_w, piano_x0, dac_strip_w,
         channels, mix_wav, sample_rate,
@@ -798,7 +801,7 @@ def main() -> None:
     else:
         _interactive(
             args, vgm_path,
-            rects, total_sec,
+            rects, total_sec, t_loop_start,
             pitch_min, pitch_max, min_white, n_whites,
             white_w, black_w, piano_x0, dac_strip_w,
             channels, mix_wav, sample_rate,

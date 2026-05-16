@@ -196,10 +196,17 @@ class _MixRenderer:
         return None
 
 
-def _parse_notes(vgm_path: Path) -> tuple[list[NoteRect], float]:
+def _parse_notes(vgm_path: Path) -> tuple[list[NoteRect], float, float]:
     vgm   = load_vgm(vgm_path)
     notes, _ = decode_vgm(vgm)
     total_sec = vgm.header.total_samples / VGM_RATE
+
+    # VGM loop point: jump-back target for seamless looping
+    h = vgm.header
+    if h.loop_samples > 0 and h.total_samples > 0:
+        t_loop_start = (h.total_samples - h.loop_samples) / VGM_RATE
+    else:
+        t_loop_start = 0.0
 
     rects: list[NoteRect] = []
     for n in notes:
@@ -210,7 +217,7 @@ def _parse_notes(vgm_path: Path) -> tuple[list[NoteRect], float]:
         color = CHANNEL_COLORS.get(n.channel, (200, 200, 200))
         rects.append(NoteRect(n.channel, n.pitch, t_on, t_off, color))
 
-    return rects, total_sec
+    return rects, total_sec, t_loop_start
 
 
 def _render_frame(
@@ -411,7 +418,7 @@ def main() -> None:
         sys.exit(f"File not found: {vgm_path}")
 
     print(f"Loading {vgm_path.name} …")
-    rects, total_sec = _parse_notes(vgm_path)
+    rects, total_sec, t_loop_start = _parse_notes(vgm_path)
     print(f"  {len(rects)} note events, {total_sec:.1f}s")
 
     pitched = [r for r in rects if r.pitch >= 0 and r.channel != CH_DAC]
