@@ -550,8 +550,9 @@ def _prepare(args, vgm_path: Path):
         print(f"  {len(phantom)} phantom notes added for seamless loop visuals")
 
         if mix_wav and mix_wav.exists():
-            extra_sec      = args.lookahead + 1.0        # a little extra headroom
-            mix_looped_wav = wav_dir / (vgm_path.stem + "_mix_looped.wav")
+            # Full loop body + tail — enough for MP4 export and interactive
+            extra_sec      = loop_dur + args.lookahead + 1.0
+            mix_looped_wav = wav_dir / (vgm_path.stem + "_mix_1loop.wav")
             if not mix_looped_wav.exists():
                 _build_looped_wav(mix_wav, t_loop_start, extra_sec, mix_looped_wav)
                 print(f"  Built looped mix WAV: {mix_looped_wav.name}")
@@ -706,7 +707,7 @@ def _interactive(
 
 def _export_mp4(
     args, vgm_path,
-    rects, total_sec,
+    rects, total_sec, t_loop_start,
     pitch_min, pitch_max, min_white, n_whites,
     white_w, black_w, piano_x0, dac_strip_w,
     channels, mix_wav, mix_looped_wav, sample_rate,
@@ -721,7 +722,9 @@ def _export_mp4(
 
     surface      = pygame.Surface((args.width, args.height))
     spf          = 1.0 / args.fps
-    total_frames = int((total_sec + args.lookahead) * args.fps)
+    # Render intro + full first loop + one extra loop pass + tail
+    loop_dur     = (total_sec - t_loop_start) if t_loop_start > 0.0 else 0.0
+    total_frames = int((total_sec + loop_dur + args.lookahead) * args.fps)
     window_s     = args.window
     autoscale    = not args.no_autoscale
     title        = vgm_path.stem
@@ -843,7 +846,7 @@ def main() -> None:
     if args.mp4:
         _export_mp4(
             args, vgm_path,
-            rects, total_sec,
+            rects, total_sec, t_loop_start,
             pitch_min, pitch_max, min_white, n_whites,
             white_w, black_w, piano_x0, dac_strip_w,
             channels, mix_wav, mix_looped_wav, sample_rate,
