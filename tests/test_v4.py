@@ -350,7 +350,7 @@ class TestTokenizerV4:
 
     def test_vocab_size(self):
         from genesis_music.tokenizer_v4 import VOCAB_SIZE
-        assert VOCAB_SIZE == 449
+        assert VOCAB_SIZE == 456
 
     def test_tempo_token_roundtrip(self):
         from genesis_music.tokenizer_v4 import tempo_to_token, TEMPO_BASE, TEMPO_BINS

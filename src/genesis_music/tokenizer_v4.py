@@ -465,14 +465,30 @@ class PatchLibrary:
 
     @staticmethod
     def _to_vector(p: Ym2612Patch) -> np.ndarray:
-        """Compact float vector for nearest-neighbour comparison."""
-        vec = [
-            p.algorithm / 7.0,
-            p.feedback / 7.0,
-        ]
+        """Full-parameter float vector for nearest-neighbour comparison.
+
+        Algorithm is one-hot encoded (8 dims, weight=4.0) so the nearest
+        neighbour can never cross algorithm boundaries — a different algorithm
+        changes the entire operator topology and always sounds completely wrong.
+        All other parameters are normalised to [0, 1].
+        """
+        # One-hot algorithm (8 bins, scaled so any algo mismatch dominates)
+        algo_oh = [0.0] * 8
+        algo_oh[p.algorithm & 7] = 4.0
+
+        vec = algo_oh + [p.feedback / 7.0]
         for i in range(4):
-            vec.append(p.tl[i] / 127.0)
-            vec.append(p.ar[i] / 31.0)
+            vec.append(p.tl[i]  / 127.0)
+            vec.append(p.ar[i]  / 31.0)
+            vec.append(p.dr[i]  / 31.0)
+            vec.append(p.sr[i]  / 31.0)
+            vec.append(p.rr[i]  / 15.0)
+            vec.append(p.sl[i]  / 15.0)
+            vec.append(p.mul[i] / 15.0)
+            vec.append(p.dt[i]  / 7.0)
+            vec.append(p.ks[i]  / 3.0)
+        vec.append(p.ams / 3.0)
+        vec.append(p.fms / 7.0)
         return np.array(vec, dtype=np.float32)
 
     @staticmethod

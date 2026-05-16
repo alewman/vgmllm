@@ -206,9 +206,9 @@ def _write_patch(stream: _VgmStream, ch: int, patch: Ym2612Patch,
         if prev is None or (prev.tl[op_idx] & 0x7F) != tl:
             stream.write_ym2612(port, 0x40 + offset + slot_offset, tl)
 
-        ar = patch.ar[op_idx] & 0x1F
-        if prev is None or (prev.ar[op_idx] & 0x1F) != ar:
-            stream.write_ym2612(port, 0x50 + offset + slot_offset, ar)
+        ar_ks = ((patch.ks[op_idx] & 0x03) << 6) | (patch.ar[op_idx] & 0x1F)
+        if prev is None or (((prev.ks[op_idx] & 0x03) << 6) | (prev.ar[op_idx] & 0x1F)) != ar_ks:
+            stream.write_ym2612(port, 0x50 + offset + slot_offset, ar_ks)
 
         dr_am = (int(patch.am_en[op_idx]) << 7) | (patch.dr[op_idx] & 0x1F)
         if prev is None or ((int(prev.am_en[op_idx]) << 7) | (prev.dr[op_idx] & 0x1F)) != dr_am:

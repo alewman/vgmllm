@@ -246,6 +246,30 @@ def generate_vgm_v4(
     note_events, patch_map = tokenizer.decode(token_list)
     log.info("Decoded to %d NoteEvents", len(note_events))
 
+    # If a real prompt was supplied (more than just the BOS token), strip the
+    # reconstructed prompt region from the output so the saved VGM contains
+    # only the model-generated continuation.
+    prompt_is_real = len(prompt_tokens) > 1
+    if prompt_is_real:
+        prompt_note_events, _ = tokenizer.decode(prompt_tokens)
+        if prompt_note_events:
+            prompt_end_sample = max(
+                (e.sample_off if e.sample_off >= 0 else e.sample_on)
+                for e in prompt_note_events
+            )
+        else:
+            prompt_end_sample = 0
+        if prompt_end_sample > 0:
+            note_events = [e for e in note_events if e.sample_on >= prompt_end_sample]
+            for e in note_events:
+                e.sample_on -= prompt_end_sample
+                if e.sample_off >= 0:
+                    e.sample_off -= prompt_end_sample
+            log.info(
+                "Stripped prompt region (%.1fs); %d NoteEvents remain",
+                prompt_end_sample / 44100.0, len(note_events),
+            )
+
     # Estimate total playback length from note events
     if note_events:
         total_samples = max(
@@ -312,6 +336,12 @@ def main():
                         help="VGM/VGZ file to use as prompt prefix")
     parser.add_argument("--prompt-tokens", type=int, default=512,
                         help="Number of tokens from prompt-vgm to use as prefix")
+    parser.add_argument("--composer", type=str, default=None,
+                        help="Composer name to condition on (e.g. 'Yuzo Koshiro'). "
+                             "Requires --vocab-version v4 and --composer-map.")
+    parser.add_argument("--composer-map", type=Path,
+                        default=Path("data/prepared_v4/composer_map_v4.json"),
+                        help="Path to composer_map_v4.json")
 
     args = parser.parse_args()
 
@@ -333,7 +363,13 @@ def main():
             import json as _json
             raw = _json.loads(Path(dac_slot_map_path).read_text())
             dac_slot_map = {int(k): int(v) for k, v in raw.items()}
-        tokenizer_v4 = TokenizerV4(patch_lib, dac_slot_map=dac_slot_map)
+        # Load composer map (same dir as dac_slot_map by convention)
+        composer_map = None
+        composer_map_path = Path(dac_slot_map_path).parent / "composer_map_v4.json"
+        if composer_map_path.exists():
+            from .tokenizer_v4 import ComposerMap
+            composer_map = ComposerMap.load(composer_map_path)
+        tokenizer_v4 = TokenizerV4(patch_lib, composer_map=composer_map, dac_slot_map=dac_slot_map)
 
         # Load drum kit: slot → raw PCM bytes (for VGM synthesis)
         drum_kit: dict[int, bytes] | None = None
@@ -347,6 +383,25 @@ def main():
         vocab = VocabV2.load(args.vocab)
     else:
         vocab = Vocab.load(args.vocab)
+
+    # Build composer token prefix for v4 if --composer specified
+    composer_prefix: list[int] = []
+    if is_v4 and args.composer is not None:
+        import json as _json3
+        cmap = _json3.loads(Path(args.composer_map).read_text())
+        clist = cmap.get("composers", [])
+        name_lower = args.composer.lower()
+        matched = next((i for i, n in enumerate(clist) if n.lower() == name_lower), None)
+        if matched is None:
+            # fuzzy: first partial match
+            matched = next((i for i, n in enumerate(clist) if name_lower in n.lower()), None)
+        if matched is not None:
+            from .tokenizer_v4 import COMPOSER_BASE
+            composer_tok = COMPOSER_BASE + matched
+            composer_prefix = [BOS_V4, composer_tok]
+            log.info("Composer conditioning: %s → token %d", clist[matched], composer_tok)
+        else:
+            log.warning("Composer '%s' not found in map, ignoring", args.composer)
 
     # Build prompt from VGM file if requested
     prompt_ids = None
@@ -364,6 +419,10 @@ def main():
             "Prompt: %s → %d tokens (of %d total)",
             args.prompt_vgm.name, len(prompt_ids), len(all_ids),
         )
+
+    # If no VGM prompt but composer prefix was built, use it
+    if prompt_ids is None and composer_prefix:
+        prompt_ids = composer_prefix
 
     # Generate
     output_dir = args.output.parent

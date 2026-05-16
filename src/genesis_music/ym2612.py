@@ -131,6 +131,9 @@ class Ym2612Patch:
 
     # Per-operator AM enable (bit 7 of register 0x60)
     am_en: tuple[bool, ...] = (False, False, False, False)
+    # Per-operator Key Scale / Rate Scaling (register 0x50, bits 7:6)
+    # Controls how fast envelopes decay at higher pitches — critical for percussion.
+    ks: tuple[int, ...] = (0, 0, 0, 0)
     # Per-operator SSG-EG (register 0x90, bits 3:0)
     ssg_eg: tuple[int, ...] = (0, 0, 0, 0)
 
@@ -160,9 +163,19 @@ class Ym2612Patch:
         return min(self.tl[i] for i in _carrier_ops(self.algorithm))
 
     def to_fingerprint(self) -> tuple:
-        """Compact tuple for hashing/equality checks."""
-        return (self.algorithm, self.feedback, self.tl, self.ar, self.ssg_eg, self.am_en, self.pan,
-                self.ch3_mode, self.ch3_op_fnum_lo, self.ch3_op_fnum_hi, self.ch3_op_block)
+        """Compact tuple for hashing/equality checks.
+
+        Includes all perceptually significant parameters so that patches
+        differing only in envelope shape (DR/SR/RR/SL), multiplier or
+        detune are treated as distinct entries rather than collapsed.
+        """
+        return (
+            self.algorithm, self.feedback,
+            self.tl, self.ar, self.dr, self.sr, self.rr, self.sl,
+            self.mul, self.dt, self.ks,
+            self.ams, self.fms,
+            self.am_en, self.ssg_eg,
+        )
 
 
 @dataclass
@@ -229,6 +242,7 @@ class _FmChannelState:
     lr:  int = 3            # L/R output enable bits 0b11=both, 0b10=R, 0b01=L
     am_en: list = field(default_factory=lambda: [False] * 4)
     ssg_eg: list = field(default_factory=lambda: [0] * 4)
+    ks: list = field(default_factory=lambda: [0] * 4)
 
     # CH3 special-mode per-operator F-numbers (slot indices 0-2)
     # Written via regs 0xA8/0xA9/0xAA (lo) and 0xAC/0xAD/0xAE (block+hi)
@@ -268,6 +282,7 @@ class _FmChannelState:
             pan=self.lr,
             am_en=tuple(self.am_en),
             ssg_eg=tuple(self.ssg_eg),
+            ks=tuple(self.ks),
             lfo_en=lfo_en,
             lfo_rate=lfo_rate,
             ch3_mode=ch3_mode,
@@ -599,6 +614,7 @@ class Ym2612State:
                         yield note
             elif base == 0x50:
                 self.channels[ch].ar[op] = val & 0x1F
+                self.channels[ch].ks[op] = (val >> 6) & 0x03
             elif base == 0x60:
                 self.channels[ch].dr[op]    = val & 0x1F
                 self.channels[ch].am_en[op] = bool(val & 0x80)

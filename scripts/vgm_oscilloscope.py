@@ -115,6 +115,11 @@ class Channel:
     def file_stem(self) -> str:
         return self.name.replace(" ", "").lower()
 
+    @property
+    def use_trigger(self) -> bool:
+        """False for percussive/noise channels that shouldn't be trigger-locked."""
+        return self.ch_id not in (CH_DAC, CH_PSG_NOISE)
+
 
 def _make_channel_table() -> list[Channel]:
     return [Channel(*row) for row in _CH_TABLE]
@@ -133,11 +138,20 @@ class VGMPlayRenderer:
                                     f"Pass --vgmplay-dir to specify its location.")
 
     def _patch_ini(self, original: str, ym2612_mask: int, psg_mask: int) -> str:
-        """Return patched ini text with LogSound=1 and per-chip MuteMasks."""
+        """Return patched ini text with LogSound=1, SndOut=-1 and per-chip MuteMasks."""
+        # If ini is empty, build the minimal block then append chip sections
+        if not original.strip():
+            original = (
+                "[General]\nLogSound = 1\nSndOut = -1\n"
+                f"[YM2612]\nMuteMask = 0x{ym2612_mask:02X}\n"
+                f"[SN76496]\nMuteMask = 0x{psg_mask:02X}\n"
+            )
+            return original
         lines = original.splitlines()
         result: list[str] = []
         current_section: Optional[str] = None
         log_sound_patched = False
+        sndout_patched = False
 
         for line in lines:
             stripped = line.strip()
@@ -164,15 +178,24 @@ class VGMPlayRenderer:
                 log_sound_patched = True
                 continue
 
+            # Patch SndOut in [General] — -1 = no audio device (silent, faster than real-time)
+            if current_section == "General" and re.match(r"SndOut\s*=", stripped):
+                result.append("SndOut = -1")
+                sndout_patched = True
+                continue
+
             result.append(line)
 
-        # If LogSound line didn't exist, insert it after [General] header
-        if not log_sound_patched:
+        # If LogSound / SndOut lines didn't exist, insert them after [General] header
+        if not log_sound_patched or not sndout_patched:
             final: list[str] = []
             for line in result:
                 final.append(line)
                 if line.strip() == "[General]":
-                    final.append("LogSound = 1")
+                    if not log_sound_patched:
+                        final.append("LogSound = 1")
+                    if not sndout_patched:
+                        final.append("SndOut = -1")
             result = final
 
         return "\n".join(result)
@@ -372,16 +395,94 @@ def find_trigger_offset(audio: np.ndarray, center: int, window: int) -> int:
 
 
 def get_oscilloscope_window(
-    audio: np.ndarray, pos: int, window_samples: int
+    audio: np.ndarray, pos: int, window_samples: int, triggered: bool = True
 ) -> np.ndarray:
-    """Return a triggered window of `window_samples` centered near `pos`."""
-    start = find_trigger_offset(audio, pos, window_samples)
+    """Return a window of `window_samples` centered near `pos`.
+
+    When triggered=True (default) the window is snapped to the nearest
+    rising zero-crossing for a stable trace.  Pass triggered=False for
+    percussive / noise channels (DAC, PSG Noise) so the raw audio scrolls
+    through without the trigger hunting in silence.
+    """
+    if triggered:
+        start = find_trigger_offset(audio, pos, window_samples)
+    else:
+        half = window_samples // 2
+        start = max(0, min(pos - half, len(audio) - window_samples))
     end = start + window_samples
     if end <= len(audio):
         return audio[start:end]
     # Pad if near end of file
     seg = audio[start:]
     return np.pad(seg, (0, window_samples - len(seg)))
+
+
+# ── adaptive windowing ────────────────────────────────────────────────────────
+
+def detect_pitch_hz(
+    segment: np.ndarray,
+    sample_rate: int,
+    min_hz: float = 40.0,
+    max_hz: float = 8000.0,
+) -> Optional[float]:
+    """Estimate dominant pitch via autocorrelation.  Returns Hz or None."""
+    if len(segment) < 8:
+        return None
+    seg = segment - np.mean(segment)
+    if float(np.sqrt(np.mean(seg ** 2))) < 1e-4:
+        return None
+
+    min_lag = max(1, int(sample_rate / max_hz))
+    max_lag = min(int(sample_rate / min_hz), len(seg) // 2)
+    if min_lag >= max_lag:
+        return None
+
+    n = len(seg)
+    n_fft = 1 << (2 * n - 1).bit_length()  # next power-of-2 >= 2*n
+    fft_out = np.fft.rfft(seg, n=n_fft)
+    acf = np.fft.irfft(fft_out * np.conj(fft_out))[:n]
+    if acf[0] < 1e-10:
+        return None
+    acf /= acf[0]
+
+    search = acf[min_lag : max_lag + 1]
+    if len(search) == 0:
+        return None
+    peak_idx = int(np.argmax(search))
+    if search[peak_idx] < 0.3:   # weak periodicity → treat as unpitched
+        return None
+
+    return float(sample_rate) / (min_lag + peak_idx)
+
+
+def adaptive_window_samples(
+    audio: np.ndarray,
+    pos: int,
+    sample_rate: int,
+    target_cycles: float = 2.5,
+    default_samples: int = None,
+) -> int:
+    """
+    Return window size in samples showing ~target_cycles of the channel's
+    current pitch.  Falls back to default_samples when pitch is undetectable
+    (noise, silence, percussive content).
+    """
+    if default_samples is None:
+        default_samples = int(0.08 * sample_rate)
+
+    detect_n = int(0.10 * sample_rate)  # 100 ms for pitch analysis
+    start = max(0, pos - detect_n // 2)
+    end = min(len(audio), start + detect_n)
+    if end - start < 8:
+        return default_samples
+
+    hz = detect_pitch_hz(audio[start:end], sample_rate)
+    if hz is None:
+        return default_samples
+
+    window_s = target_cycles / hz
+    window_s = max(0.008, min(0.250, window_s))  # clamp 8 ms – 250 ms
+    return int(window_s * sample_rate)
 
 
 # ── figure layout ─────────────────────────────────────────────────────────────
@@ -429,9 +530,14 @@ def show_preview(
     fig.suptitle(f"{APP_NAME}{sub}", color="#cccccc", fontsize=11)
     axes_flat = np.array(axes).flatten()
 
-    t = np.linspace(0, window_s * 1000, window)  # ms
-
     for i, (ax, ch) in enumerate(zip(axes_flat, channels)):
+        if autoscale and ch.audio is not None and len(ch.audio) > 0:
+            this_window = adaptive_window_samples(ch.audio, pos, sample_rate,
+                                                  default_samples=window)
+        else:
+            this_window = window
+        t = np.linspace(0, this_window / sample_rate * 1000, this_window)
+
         ax.set_facecolor("#0d0d0d")
         ax.tick_params(colors="#444444", labelsize=7)
         for spine in ax.spines.values():
@@ -445,10 +551,10 @@ def show_preview(
         ax.set_xlabel("ms", color="#444444", fontsize=7)
 
         if ch.audio is not None and len(ch.audio) > 0:
-            wnd = get_oscilloscope_window(ch.audio, pos, window)
+            wnd = get_oscilloscope_window(ch.audio, pos, this_window, triggered=ch.use_trigger)
             ax.plot(t, wnd, color=ch.color, linewidth=0.9, antialiased=True)
         else:
-            ax.plot(t, np.zeros(window), color=ch.color, linewidth=0.9)
+            ax.plot(t, np.zeros(this_window), color=ch.color, linewidth=0.9)
 
     # Hide unused axes
     for ax in axes_flat[n:]:
@@ -523,17 +629,35 @@ def play_live(
     plt.ion()
     plt.show(block=False)
 
+    # Timer label — top-left of figure, outside subplot area
+    timer_text = fig.text(0.01, 0.99, "0:00.000",
+                          color="#888888", fontsize=9,
+                          ha="left", va="top",
+                          fontfamily="monospace")
+
     print("Playing … close window or press Ctrl+C to stop.")
     try:
         while pygame.mixer.music.get_busy():
             pos_ms = pygame.mixer.music.get_pos()
             pos_sample = int(pos_ms / 1000.0 * sample_rate)
             vgm_pos = int(pos_sample * VGM_RATE / sample_rate)
+            mins, secs = divmod(pos_ms / 1000.0, 60)
+            timer_text.set_text(f"{int(mins)}:{secs:06.3f}")
 
             for ln, ch in zip(lines, channels):
                 if ch.audio is not None and len(ch.audio) > 0:
-                    wnd = get_oscilloscope_window(ch.audio, pos_sample, window)
+                    if autoscale:
+                        this_win = adaptive_window_samples(ch.audio, pos_sample,
+                                                           sample_rate, default_samples=window)
+                    else:
+                        this_win = window
+                    wnd = get_oscilloscope_window(ch.audio, pos_sample, this_win,
+                                                  triggered=ch.use_trigger)
+                    t_ch = np.linspace(0, this_win / sample_rate * 1000, this_win)
+                    ln.set_xdata(t_ch)
                     ln.set_ydata(wnd)
+                    if autoscale:
+                        ln.axes.set_xlim(0, t_ch[-1])
 
             for tt, ch in zip(title_texts, channels):
                 new_title = _dynamic_title(ch, vgm_pos, dac_is_active, ch3_special_is_active)
@@ -597,7 +721,7 @@ def export_mp4(
         print("No audio data to export.")
         return
     total_frames = int(max_samples / sample_rate * fps) + 1
-    print(f"  Exporting {total_frames} frames @ {fps}fps → {out_mp4.name}")
+    print(f"  Exporting {total_frames} frames @ {fps}fps -> {out_mp4.name}")
 
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(fig_w, fig_h), dpi=dpi)
     fig.patch.set_facecolor("#0a0a0a")
@@ -627,6 +751,12 @@ def export_mp4(
 
     plt.tight_layout()
 
+    # Timer label — top-left of figure
+    timer_text = fig.text(0.01, 0.99, "0:00.000",
+                          color="#666666", fontsize=11,
+                          ha="left", va="top",
+                          fontfamily="monospace")
+
     # ffmpeg process: reads raw RGB frames from stdin, writes MP4
     cmd = [
         ffmpeg, "-y",
@@ -653,11 +783,24 @@ def export_mp4(
         for frame_idx in range(total_frames):
             pos_sample = int(frame_idx * samples_per_frame)
             vgm_pos = int(pos_sample * VGM_RATE / sample_rate)
+            pos_ms = pos_sample / sample_rate * 1000.0
+            mins, secs = divmod(pos_ms / 1000.0, 60)
+            timer_text.set_text(f"{int(mins)}:{secs:06.3f}")
 
             for ln, ch in zip(lines, channels):
                 if ch.audio is not None and len(ch.audio) > 0:
-                    wnd = get_oscilloscope_window(ch.audio, pos_sample, window)
+                    if autoscale:
+                        this_win = adaptive_window_samples(ch.audio, pos_sample,
+                                                           sample_rate, default_samples=window)
+                    else:
+                        this_win = window
+                    wnd = get_oscilloscope_window(ch.audio, pos_sample, this_win,
+                                                  triggered=ch.use_trigger)
+                    t_ch = np.linspace(0, this_win / sample_rate * 1000, this_win)
+                    ln.set_xdata(t_ch)
                     ln.set_ydata(wnd)
+                    if autoscale:
+                        ln.axes.set_xlim(0, t_ch[-1])
 
             for tt, ch in zip(title_texts, channels):
                 new_title = _dynamic_title(ch, vgm_pos, dac_is_active, ch3_special_is_active)
@@ -681,7 +824,7 @@ def export_mp4(
         proc.wait()
         plt.close(fig)
 
-    print(f"\n  Done → {out_mp4}  ({time.time()-t0:.1f}s total)")
+    print(f"\n  Done -> {out_mp4}  ({time.time()-t0:.1f}s total)")
 
 
 # ── corrscope YAML generator ──────────────────────────────────────────────────
@@ -722,7 +865,7 @@ def write_corrscope_yaml(channels: list[Channel], mix_wav: Path, out_yaml: Path)
         channel_entries=entries,
     )
     out_yaml.write_text(text, encoding="utf-8")
-    print(f"  corrscope config → {out_yaml}")
+    print(f"  corrscope config -> {out_yaml}")
     print(f"  Run: corrscope \"{out_yaml}\"")
 
 

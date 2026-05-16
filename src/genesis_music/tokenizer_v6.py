@@ -1,0 +1,807 @@
+"""v6 tokenizer — lossless FM patch encoding.
+
+Identical to v4 except the per-channel header stores every FM operator
+parameter directly as tokens instead of a 128-entry library lookup ID.
+This eliminates the timbre quantisation error that caused "harpsichord"
+artefacts in v4 roundtrips: the exact patch is preserved in the token
+stream so synthesise_vgm() always has perfect register values.
+
+Vocabulary: 660 tokens (456 v4 tokens + 204 new FM parameter tokens).
+
+New token ranges (all appended after v4 vocab, backward-incompatible
+with v4 but the note-stream tokens are identical so the musical content
+is the same):
+
+  IDs 456–463  FM_ALG_BASE   algorithm 0–7
+  IDs 464–471  FM_P8_BASE    8-value range (feedback, detune)
+  IDs 472–475  FM_P4_BASE    4-value range (ams, ks)
+  IDs 476–483  FM_FMS_BASE   fms 0–7
+  IDs 484–611  FM_TL_BASE    total level 0–127
+  IDs 612–643  FM_AR32_BASE  5-bit range (ar, dr, sr 0–31)
+  IDs 644–659  FM_P16_BASE   4-bit range (rr, sl, mul 0–15)
+
+Per-FM-channel header block (40 tokens):
+  ALG, FB, AMS, FMS,
+  [TL, AR, DR, SR, RR, SL, MUL, DT, KS] × 4 operators
+
+Usage::
+
+    tok = TokenizerV6(composer_map=cmap, dac_slot_map=dac_slot_map)
+    tokens = tok.encode(vgm_file)
+    note_events, header = tok.decode(tokens)
+    vgm_bytes = synthesise_vgm(note_events, total_samples,
+                                header["channel_patches_direct"])
+"""
+
+from __future__ import annotations
+
+import gzip
+import json
+import logging
+import re
+import struct
+from collections import Counter
+from pathlib import Path
+from typing import Sequence
+
+import numpy as np
+
+from .music_analysis import (
+    ROLE_BASS, ROLE_COUNTER, ROLE_DRUMS, ROLE_HARM,
+    ROLE_LEAD, ROLE_PERC, ROLE_UNK,
+    SAMPLE_RATE, TEMPO_BINS,
+    analyse_vgm, should_discard,
+)
+from .vgm_parser import VgmFile, load_vgm
+from .ym2612 import (
+    CH_DAC, CH_FM_0, CH_PSG_0, CH_PSG_1, CH_PSG_2, CH_PSG_NOISE,
+    NoteEvent, Ym2612Patch, TL_SILENCE_THRESHOLD, _carrier_ops, decode_vgm,
+)
+
+log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Vocabulary layout  (660 tokens total)
+# ---------------------------------------------------------------------------
+#
+# IDs 0–3    Special
+# IDs 4–19   Tempo (16 bins)
+# IDs 20–43  Key (24: 12 major + 12 minor)
+# IDs 44–47  Meter
+# IDs 48     BAR
+# IDs 49–64  BEAT_0 … BEAT_15 (16th-note positions)
+# IDs 65     PHRASE_END
+# IDs 66–71  CH_FM_0 … CH_FM_5
+# IDs 72     CH_DAC_TOK
+# IDs 73–75  CH_PSG_0_TOK … CH_PSG_2_TOK
+# IDs 76–82  ROLE tokens (7)
+# IDs 83–210 PATCH_0 … PATCH_127  (unused in encode; kept for compat)
+# IDs 211–213 NOTE_ON / NOTE_OFF / NOTE_HOLD
+# IDs 214–301 PITCH_0 … PITCH_87  (MIDI 24–111)
+# IDs 302–317 VEL_0 … VEL_15
+# IDs 318–325 DAC_HIT_0 … DAC_HIT_7
+# IDs 326    PSG_NOISE_HIT
+# IDs 327–454 COMPOSER_0 … COMPOSER_127
+# IDs 455    UNK_COMPOSER
+# IDs 456–463 FM_ALG_BASE   algorithm 0–7
+# IDs 464–471 FM_P8_BASE    8-value range (feedback, detune)
+# IDs 472–475 FM_P4_BASE    4-value range (ams, ks)
+# IDs 476–483 FM_FMS_BASE   fms 0–7
+# IDs 484–611 FM_TL_BASE    total level 0–127
+# IDs 612–643 FM_AR32_BASE  5-bit range: ar, dr, sr 0–31
+# IDs 644–659 FM_P16_BASE   4-bit range: rr, sl, mul 0–15
+# VOCAB_SIZE  660
+# ---------------------------------------------------------------------------
+
+PAD = 0
+BOS = 1
+EOS = 2
+UNK = 3
+
+TEMPO_BASE = 4
+KEY_BASE   = 20
+METER_44   = 44
+METER_34   = 45
+METER_68   = 46
+METER_24   = 47
+
+BAR        = 48
+BEAT_BASE  = 49
+PHRASE_END = 65
+
+CH_FM_BASE  = 66
+CH_DAC_TOK  = 72
+CH_PSG_BASE = 73
+
+ROLE_TOKEN_BASE = 76
+_ROLE_ORDER = [ROLE_BASS, ROLE_LEAD, ROLE_HARM,
+               ROLE_COUNTER, ROLE_DRUMS, ROLE_PERC, ROLE_UNK]
+ROLE_TO_TOKEN = {r: ROLE_TOKEN_BASE + i for i, r in enumerate(_ROLE_ORDER)}
+TOKEN_TO_ROLE = {v: k for k, v in ROLE_TO_TOKEN.items()}
+
+PATCH_BASE  = 83          # kept for backward compat / not used in encode
+NUM_PATCHES = 128
+
+NOTE_ON   = 211
+NOTE_OFF  = 212
+NOTE_HOLD = 213
+
+PITCH_BASE     = 214
+PITCH_MIN_MIDI = 24
+PITCH_MAX_MIDI = 111
+NUM_PITCHES    = PITCH_MAX_MIDI - PITCH_MIN_MIDI + 1   # 88
+
+VEL_BASE = 302
+
+NUM_DAC_SLOTS = 8
+DAC_HIT_BASE  = 318
+DAC_HIT_UNK   = DAC_HIT_BASE
+DAC_HIT       = DAC_HIT_BASE
+
+PSG_NOISE_HIT = 326
+
+COMPOSER_BASE = 327
+NUM_COMPOSERS = 128
+UNK_COMPOSER  = COMPOSER_BASE + NUM_COMPOSERS  # 455
+
+# ---------------------------------------------------------------------------
+# New in v6: direct FM parameter tokens
+# ---------------------------------------------------------------------------
+
+FM_ALG_BASE  = 456   # algorithm 0–7        (8 tokens)
+FM_P8_BASE   = 464   # 8-value range        (8 tokens)  feedback, detune
+FM_P4_BASE   = 472   # 4-value range        (4 tokens)  ams, ks
+FM_FMS_BASE  = 476   # fms 0–7              (8 tokens)
+FM_TL_BASE   = 484   # total level 0–127    (128 tokens)
+FM_AR32_BASE = 612   # 5-bit range 0–31     (32 tokens)  ar, dr, sr
+FM_P16_BASE  = 644   # 4-bit range 0–15     (16 tokens)  rr, sl, mul
+
+FM_PATCH_TOKENS = 40  # tokens per FM channel in header
+
+VOCAB_SIZE = 660
+
+
+# ---------------------------------------------------------------------------
+# Shared token helpers (identical to v4)
+# ---------------------------------------------------------------------------
+
+def _split_composers(raw: str) -> list[str]:
+    parts = re.split(r',|;|\band\b', raw)
+    names = []
+    for p in parts:
+        n = p.strip()
+        if n and len(n) > 1 and not n.startswith('('):
+            n = re.sub(r'\s*\(.*?\)\s*', '', n).strip()
+            if n:
+                names.append(n)
+    return names
+
+
+def _fast_read_author(path: Path) -> str:
+    try:
+        raw = path.read_bytes()
+        if path.suffix.lower() == '.vgz':
+            raw = gzip.decompress(raw)
+        if len(raw) < 0x20 or raw[:4] != b'Vgm ':
+            return ''
+        gd3_rel = struct.unpack_from('<I', raw, 0x14)[0]
+        if gd3_rel == 0:
+            return ''
+        gd3_abs = gd3_rel + 0x14
+        if gd3_abs + 12 > len(raw) or raw[gd3_abs:gd3_abs + 4] != b'Gd3 ':
+            return ''
+        pos = gd3_abs + 12
+
+        def _read_utf16le(data: bytes, p: int) -> tuple[str, int]:
+            chars = []
+            while p + 1 < len(data):
+                cp = struct.unpack_from('<H', data, p)[0]
+                p += 2
+                if cp == 0:
+                    break
+                chars.append(chr(cp))
+            return ''.join(chars), p
+
+        for _ in range(6):
+            _, pos = _read_utf16le(raw, pos)
+        author_en, _ = _read_utf16le(raw, pos)
+        return author_en.strip()
+    except Exception:
+        return ''
+
+
+def tempo_to_token(bpm: float) -> int:
+    diffs = [abs(bpm - b) for b in TEMPO_BINS]
+    return TEMPO_BASE + int(min(range(len(diffs)), key=diffs.__getitem__))
+
+
+def key_to_token(key_index: int, is_minor: bool) -> int:
+    offset = 12 if is_minor else 0
+    return KEY_BASE + offset + (key_index % 12)
+
+
+def token_to_key(token: int) -> tuple[int, bool]:
+    v = token - KEY_BASE
+    return v % 12, v >= 12
+
+
+def pitch_to_token(midi: int) -> int | None:
+    if PITCH_MIN_MIDI <= midi <= PITCH_MAX_MIDI:
+        return PITCH_BASE + (midi - PITCH_MIN_MIDI)
+    return None
+
+
+def token_to_pitch(token: int) -> int:
+    return PITCH_MIN_MIDI + (token - PITCH_BASE)
+
+
+def channel_to_token(ch: int) -> int | None:
+    if CH_FM_0 <= ch <= 5:
+        return CH_FM_BASE + ch
+    if ch == CH_DAC:
+        return CH_DAC_TOK
+    if ch in (CH_PSG_0, CH_PSG_1, CH_PSG_2):
+        return CH_PSG_BASE + (ch - CH_PSG_0)
+    return None
+
+
+def vel_to_token(vel: int) -> int:
+    return VEL_BASE + max(0, min(15, vel))
+
+
+# ---------------------------------------------------------------------------
+# Direct FM patch encode / decode  (the v6 core improvement)
+# ---------------------------------------------------------------------------
+
+def encode_fm_patch(patch: Ym2612Patch) -> list[int]:
+    """Encode one Ym2612Patch as exactly FM_PATCH_TOKENS (40) parameter tokens.
+
+    Token order (fixed, no separator needed):
+      ALG, FB, AMS, FMS,
+      for each of 4 operators: TL, AR, DR, SR, RR, SL, MUL, DT, KS
+    """
+    toks = [
+        FM_ALG_BASE + (patch.algorithm & 7),
+        FM_P8_BASE  + (patch.feedback  & 7),
+        FM_P4_BASE  + (patch.ams       & 3),
+        FM_FMS_BASE + (patch.fms       & 7),
+    ]
+    for i in range(4):
+        toks += [
+            FM_TL_BASE   + (patch.tl[i]  & 127),
+            FM_AR32_BASE + (patch.ar[i]  & 31),
+            FM_AR32_BASE + (patch.dr[i]  & 31),
+            FM_AR32_BASE + (patch.sr[i]  & 31),
+            FM_P16_BASE  + (patch.rr[i]  & 15),
+            FM_P16_BASE  + (patch.sl[i]  & 15),
+            FM_P16_BASE  + (patch.mul[i] & 15),
+            FM_P8_BASE   + (patch.dt[i]  & 7),
+            FM_P4_BASE   + (patch.ks[i]  & 3),
+        ]
+    assert len(toks) == FM_PATCH_TOKENS
+    return toks
+
+
+def decode_fm_patch(tokens: list[int], pos: int) -> Ym2612Patch | None:
+    """Decode FM_PATCH_TOKENS (40) direct parameter tokens → Ym2612Patch.
+
+    Returns None if tokens at *pos* are not a valid patch block.
+    """
+    if pos + FM_PATCH_TOKENS > len(tokens):
+        return None
+    t = tokens[pos:]
+    if not (FM_ALG_BASE <= t[0] < FM_ALG_BASE + 8):
+        return None
+
+    algorithm = t[0] - FM_ALG_BASE
+    feedback  = t[1] - FM_P8_BASE
+    ams       = t[2] - FM_P4_BASE
+    fms       = t[3] - FM_FMS_BASE
+
+    tl  = [0] * 4; ar  = [0] * 4; dr  = [0] * 4
+    sr  = [0] * 4; rr  = [0] * 4; sl  = [0] * 4
+    mul = [0] * 4; dt  = [0] * 4; ks  = [0] * 4
+
+    for i in range(4):
+        base = 4 + i * 9
+        tl[i]  = t[base + 0] - FM_TL_BASE
+        ar[i]  = t[base + 1] - FM_AR32_BASE
+        dr[i]  = t[base + 2] - FM_AR32_BASE
+        sr[i]  = t[base + 3] - FM_AR32_BASE
+        rr[i]  = t[base + 4] - FM_P16_BASE
+        sl[i]  = t[base + 5] - FM_P16_BASE
+        mul[i] = t[base + 6] - FM_P16_BASE
+        dt[i]  = t[base + 7] - FM_P8_BASE
+        ks[i]  = t[base + 8] - FM_P4_BASE
+
+    return Ym2612Patch(
+        algorithm=algorithm, feedback=feedback,
+        tl=tuple(tl), ar=tuple(ar), dr=tuple(dr),
+        sr=tuple(sr), rr=tuple(rr), sl=tuple(sl),
+        mul=tuple(mul), dt=tuple(dt), ks=tuple(ks),
+        ams=ams, fms=fms,
+    )
+
+
+# ---------------------------------------------------------------------------
+# ComposerMap  (identical to v4)
+# ---------------------------------------------------------------------------
+
+class ComposerMap:
+    def __init__(self, composers: list[str]) -> None:
+        self.composers: list[str] = composers[:NUM_COMPOSERS]
+        self._lookup: dict[str, int] = {
+            name.lower(): COMPOSER_BASE + i
+            for i, name in enumerate(self.composers)
+        }
+
+    def lookup(self, raw_author: str) -> int:
+        if not raw_author:
+            return UNK_COMPOSER
+        tok = self._lookup.get(raw_author.lower().strip())
+        if tok is not None:
+            return tok
+        for name in _split_composers(raw_author):
+            tok = self._lookup.get(name.lower())
+            if tok is not None:
+                return tok
+        return UNK_COMPOSER
+
+    def name(self, token_id: int) -> str:
+        idx = token_id - COMPOSER_BASE
+        if 0 <= idx < len(self.composers):
+            return self.composers[idx]
+        return "Unknown"
+
+    def __len__(self) -> int:
+        return len(self.composers)
+
+    def save(self, path: str | Path) -> None:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"composers": self.composers}, indent=2))
+
+    @classmethod
+    def load(cls, path: str | Path) -> "ComposerMap":
+        data = json.loads(Path(path).read_text())
+        return cls(data["composers"])
+
+    @classmethod
+    def build(cls, vgm_files: Sequence, top_n: int = NUM_COMPOSERS) -> "ComposerMap":
+        counter: Counter[str] = Counter()
+        for item in vgm_files:
+            if hasattr(item, 'gd3'):
+                gd3 = getattr(item, 'gd3', None)
+                raw = gd3.author_en.strip() if gd3 else ''
+            else:
+                raw = _fast_read_author(Path(str(item)))
+            if raw and raw.lower() not in ('unknown', ''):
+                for name in _split_composers(raw):
+                    counter[name] += 1
+        top = [name for name, _ in counter.most_common(top_n)]
+        return cls(top)
+
+
+# ---------------------------------------------------------------------------
+# TokenizerV6
+# ---------------------------------------------------------------------------
+
+class TokenizerV6:
+    """v6 tokenizer: lossless FM patch encoding via direct parameter tokens.
+
+    PatchLibrary is not required.  Every FM channel's full patch parameters
+    are stored directly in the token header (40 tokens per channel).
+
+    Parameters
+    ----------
+    composer_map : ComposerMap | None
+        Optional composer conditioning.  Can reuse existing v4 composer map
+        (same token IDs 327–455).
+    dac_slot_map : dict[int, int] | None
+        Maps pcm_offset → DAC slot index 0–7.  Same format as v4.
+    beats_per_bar : int
+        Default 4.
+    subdivisions : int
+        16th-note grid resolution.  Default 16.
+    """
+
+    def __init__(
+        self,
+        composer_map: ComposerMap | None = None,
+        beats_per_bar: int = 4,
+        subdivisions: int = 16,
+        dac_slot_map: dict[int, int] | None = None,
+    ) -> None:
+        self.composer_map  = composer_map
+        self.beats_per_bar = beats_per_bar
+        self.subdivisions  = subdivisions
+        self._dac_slot_map: dict[int, int] = dac_slot_map or {}
+
+    # ------------------------------------------------------------------
+    # Encode
+    # ------------------------------------------------------------------
+
+    def encode(
+        self,
+        vgm: VgmFile,
+        *,
+        skip_filter: bool = False,
+    ) -> list[int] | None:
+        """Encode VGM → token list, or None if filtered out."""
+        note_events, _last_patches = decode_vgm(vgm)
+        total_samples = vgm.header.total_samples or (
+            max((e.sample_on for e in note_events), default=0) + SAMPLE_RATE
+        )
+
+        # Build patch_map: for each FM channel, pick the most-used patch
+        # (by note count) that has an audible carrier TL. This handles songs
+        # that change instruments mid-song or temporarily mute a channel with
+        # TL=127 — we want the primary audible timbre, not the last-seen state.
+        _patch_counter: dict[int, Counter] = {}
+        _patch_by_fp: dict[int, dict] = {}
+        for n in note_events:
+            ch = n.channel
+            if not (0 <= ch <= 5) or n.patch is None:
+                continue
+            fp = n.patch.to_fingerprint()
+            _patch_counter.setdefault(ch, Counter())[fp] += 1
+            _patch_by_fp.setdefault(ch, {})[fp] = n.patch
+        patch_map: dict[int, Ym2612Patch] = dict(_last_patches)
+        for ch in range(6):
+            if ch not in _patch_counter:
+                continue
+            carriers = _carrier_ops(_last_patches[ch].algorithm if ch in _last_patches else 0)
+            # Prefer most-common patch whose carrier TL is below the silence
+            # threshold; fall back to overall most-common if all are muted.
+            ordered = _patch_counter[ch].most_common()
+            chosen = next(
+                (fp for fp, _ in ordered
+                 if all(_patch_by_fp[ch][fp].tl[c] < TL_SILENCE_THRESHOLD for c in carriers)),
+                ordered[0][0] if ordered else None,
+            )
+            if chosen is not None:
+                patch_map[ch] = _patch_by_fp[ch][chosen]
+
+        if not skip_filter:
+            discard, reason = should_discard(note_events, total_samples)
+            if discard:
+                log.debug("Filtered %s: %s", vgm.source_path, reason)
+                return None
+
+        analysis = analyse_vgm(note_events, total_samples)
+
+        tokens: list[int] = [BOS]
+
+        # ---- Global header ----
+        tokens.append(tempo_to_token(analysis.tempo_bpm))
+        tokens.append(key_to_token(analysis.key_index, analysis.is_minor))
+        tokens.append(METER_44)
+
+        # ---- Composer ----
+        if self.composer_map is not None:
+            gd3 = getattr(vgm, 'gd3', None)
+            raw_author = gd3.author_en.strip() if gd3 else ''
+            tokens.append(self.composer_map.lookup(raw_author))
+        else:
+            tokens.append(UNK_COMPOSER)
+
+        # ---- Channel header: CH_tok, ROLE_tok, [40 patch tokens for FM] ----
+        active_channels = sorted(analysis.channel_roles.keys())
+        for ch in active_channels:
+            ch_tok = channel_to_token(ch)
+            if ch_tok is None:
+                continue
+            role = analysis.channel_roles[ch]
+            role_tok = ROLE_TO_TOKEN.get(role, ROLE_TO_TOKEN[ROLE_UNK])
+            tokens.append(ch_tok)
+            tokens.append(role_tok)
+            # FM channels: emit 40 direct parameter tokens
+            if 0 <= ch <= 5:
+                patch = patch_map.get(ch)
+                if patch is not None:
+                    tokens.extend(encode_fm_patch(patch))
+                else:
+                    # Fallback: silence patch (all zeros, algo 0)
+                    tokens.extend(encode_fm_patch(Ym2612Patch(
+                        algorithm=0, feedback=0,
+                        tl=(127,)*4, ar=(0,)*4, dr=(0,)*4, sr=(0,)*4,
+                        rr=(0,)*4, sl=(0,)*4, mul=(1,)*4, dt=(0,)*4,
+                    )))
+            # DAC and PSG channels: no patch tokens
+
+        # ---- Note stream (identical to v4) ----
+        tokens.extend(self._encode_note_stream(note_events, analysis))
+        tokens.append(EOS)
+        return tokens
+
+    def _encode_note_stream(self, note_events: list[NoteEvent], analysis) -> list[int]:
+        if not note_events:
+            return []
+
+        bpm          = analysis.tempo_bpm
+        bar_samples  = SAMPLE_RATE * 60.0 / bpm * self.beats_per_bar
+        beat_samples = bar_samples / self.subdivisions
+
+        events_by_time: list[tuple[int, str, NoteEvent]] = []
+        for e in note_events:
+            if e.sample_on >= 0:
+                events_by_time.append((e.sample_on, "on", e))
+            if e.sample_off >= 0:
+                events_by_time.append((e.sample_off, "off", e))
+        events_by_time.sort(key=lambda x: (x[0], 0 if x[1] == "off" else 1))
+
+        if not events_by_time:
+            return []
+
+        tokens: list[int] = []
+        current_bar  = -1
+        current_beat = -1
+
+        for sample_pos, kind, event in events_by_time:
+            bar  = int(sample_pos / bar_samples)
+            beat = int((sample_pos % bar_samples) / beat_samples)
+            beat = min(beat, self.subdivisions - 1)
+
+            if bar != current_bar:
+                tokens.append(BAR)
+                current_bar  = bar
+                current_beat = -1
+
+            if beat != current_beat:
+                tokens.append(BEAT_BASE + beat)
+                current_beat = beat
+
+            ch = event.channel
+            if kind == "on":
+                if ch == CH_DAC:
+                    slot = self._dac_slot_map.get(event.dac_sample_id, 0)
+                    tokens.append(DAC_HIT_BASE + slot)
+                elif ch == CH_PSG_NOISE:
+                    tokens.append(PSG_NOISE_HIT)
+                else:
+                    ch_tok = channel_to_token(ch)
+                    if ch_tok is None:
+                        continue
+                    pitch_tok = pitch_to_token(event.pitch) if event.pitch >= 0 else None
+                    if pitch_tok is None:
+                        continue
+                    tokens.extend([ch_tok, NOTE_ON, pitch_tok, vel_to_token(event.velocity)])
+            else:
+                if ch in (CH_DAC, CH_PSG_NOISE):
+                    continue
+                ch_tok = channel_to_token(ch)
+                if ch_tok is None:
+                    continue
+                tokens.extend([ch_tok, NOTE_OFF])
+
+        return tokens
+
+    # ------------------------------------------------------------------
+    # Decode
+    # ------------------------------------------------------------------
+
+    def decode(
+        self,
+        tokens: list[int],
+        tempo_bpm: float | None = None,
+    ) -> tuple[list[NoteEvent], dict]:
+        """Decode token list → (NoteEvents, header dict).
+
+        header dict keys:
+          tempo_bpm, key_index, is_minor, meter, composer_token,
+          channel_roles, channel_patches_direct  ← dict[int, Ym2612Patch]
+        """
+        all_tokens = list(tokens)
+        pos = 0
+
+        header: dict = {
+            "tempo_bpm": 120.0,
+            "key_index": 0,
+            "is_minor": False,
+            "meter": (4, 4),
+            "composer_token": UNK_COMPOSER,
+            "channel_roles": {},
+            "channel_patches_direct": {},   # ch → Ym2612Patch (lossless)
+        }
+
+        if pos < len(all_tokens) and all_tokens[pos] == BOS:
+            pos += 1
+
+        # Tempo
+        if pos < len(all_tokens) and TEMPO_BASE <= all_tokens[pos] < TEMPO_BASE + len(TEMPO_BINS):
+            header["tempo_bpm"] = float(TEMPO_BINS[all_tokens[pos] - TEMPO_BASE])
+            pos += 1
+
+        # Key
+        if pos < len(all_tokens) and KEY_BASE <= all_tokens[pos] < KEY_BASE + 24:
+            key_idx, is_minor = token_to_key(all_tokens[pos])
+            header["key_index"] = key_idx
+            header["is_minor"]  = is_minor
+            pos += 1
+
+        # Meter
+        if pos < len(all_tokens) and all_tokens[pos] in (METER_44, METER_34, METER_68, METER_24):
+            meter_map = {METER_44: (4,4), METER_34: (3,4), METER_68: (6,8), METER_24: (2,4)}
+            header["meter"] = meter_map[all_tokens[pos]]
+            pos += 1
+
+        # Composer
+        if pos < len(all_tokens) and COMPOSER_BASE <= all_tokens[pos] <= UNK_COMPOSER:
+            header["composer_token"] = all_tokens[pos]
+            pos += 1
+
+        # Channel header entries: CH_tok, ROLE_tok, [40 patch tokens if FM]
+        while pos < len(all_tokens):
+            ch_tok = all_tokens[pos]
+
+            is_fm_ch  = CH_FM_BASE <= ch_tok <= CH_FM_BASE + 5
+            is_dac_ch = ch_tok == CH_DAC_TOK
+            is_psg_ch = CH_PSG_BASE <= ch_tok <= CH_PSG_BASE + 2
+
+            if not (is_fm_ch or is_dac_ch or is_psg_ch):
+                break  # reached note stream
+
+            # Need at least ch_tok + role_tok
+            if pos + 1 >= len(all_tokens):
+                break
+            role_tok = all_tokens[pos + 1]
+            if not (ROLE_TOKEN_BASE <= role_tok < ROLE_TOKEN_BASE + 7):
+                break
+
+            # Map to channel index
+            if is_fm_ch:
+                ch = ch_tok - CH_FM_BASE
+            elif is_dac_ch:
+                ch = CH_DAC
+            else:
+                ch = CH_PSG_0 + (ch_tok - CH_PSG_BASE)
+
+            header["channel_roles"][ch] = TOKEN_TO_ROLE.get(role_tok, ROLE_UNK)
+            pos += 2  # consumed ch_tok + role_tok
+
+            # FM channels: consume 40 direct patch tokens
+            if is_fm_ch:
+                patch = decode_fm_patch(all_tokens, pos)
+                if patch is not None:
+                    header["channel_patches_direct"][ch] = patch
+                    pos += FM_PATCH_TOKENS
+                # If invalid (e.g. truncated model output), skip gracefully
+
+        if tempo_bpm is not None:
+            header["tempo_bpm"] = tempo_bpm
+
+        bpm          = header["tempo_bpm"]
+        bar_samples  = int(SAMPLE_RATE * 60.0 / bpm * self.beats_per_bar)
+        beat_samples = bar_samples // self.subdivisions
+
+        note_events: list[NoteEvent] = []
+        open_notes: dict[int, NoteEvent] = {}
+
+        current_bar  = -1
+        current_beat = 0
+
+        def current_sample() -> int:
+            return current_bar * bar_samples + current_beat * beat_samples
+
+        it = iter(all_tokens[pos:])
+        for tok in it:
+            if tok in (EOS, PAD):
+                break
+
+            if tok == BAR:
+                current_bar  += 1
+                current_beat  = 0
+
+            elif BEAT_BASE <= tok < BEAT_BASE + self.subdivisions:
+                current_beat = tok - BEAT_BASE
+
+            elif tok == PHRASE_END:
+                pass
+
+            elif DAC_HIT_BASE <= tok < DAC_HIT_BASE + NUM_DAC_SLOTS:
+                slot = tok - DAC_HIT_BASE
+                note_events.append(NoteEvent(
+                    channel=CH_DAC, pitch=-1, velocity=15,
+                    sample_on=current_sample(),
+                    sample_off=current_sample() + beat_samples,
+                    dac_sample_id=slot,
+                ))
+
+            elif tok == PSG_NOISE_HIT:
+                note_events.append(NoteEvent(
+                    channel=CH_PSG_NOISE, pitch=-1, velocity=12,
+                    sample_on=current_sample(),
+                    sample_off=current_sample() + beat_samples,
+                ))
+
+            elif CH_FM_BASE <= tok <= CH_FM_BASE + 5:
+                ch = tok - CH_FM_BASE
+                self._decode_ch_event(it, ch, current_sample(),
+                                      open_notes, note_events, header)
+
+            elif tok == CH_DAC_TOK:
+                pass
+
+            elif CH_PSG_BASE <= tok < CH_PSG_BASE + 3:
+                ch = CH_PSG_0 + (tok - CH_PSG_BASE)
+                self._decode_ch_event(it, ch, current_sample(),
+                                      open_notes, note_events, header)
+
+        final_sample = current_sample()
+        for ch, note in open_notes.items():
+            note.sample_off = final_sample
+            note_events.append(note)
+
+        note_events.sort(key=lambda e: (e.sample_on, e.channel))
+        return note_events, header
+
+    def _decode_ch_event(
+        self,
+        it,
+        ch: int,
+        sample: int,
+        open_notes: dict,
+        note_events: list,
+        header: dict,
+    ) -> None:
+        try:
+            action = next(it)
+        except StopIteration:
+            return
+
+        if action == NOTE_ON:
+            try:
+                pitch_tok = next(it)
+                vel_tok   = next(it)
+            except StopIteration:
+                return
+            if not (PITCH_BASE <= pitch_tok < PITCH_BASE + NUM_PITCHES):
+                return
+            if not (VEL_BASE <= vel_tok < VEL_BASE + 16):
+                return
+
+            midi  = token_to_pitch(pitch_tok)
+            vel   = vel_tok - VEL_BASE
+
+            # Use the lossless direct patch from header
+            patch = header["channel_patches_direct"].get(ch)
+
+            if ch in open_notes:
+                old = open_notes[ch]
+                old.sample_off = sample
+                note_events.append(old)
+
+            note = NoteEvent(
+                channel=ch, pitch=midi, velocity=vel,
+                sample_on=sample, patch=patch,
+            )
+            open_notes[ch] = note
+
+        elif action == NOTE_OFF:
+            if ch in open_notes:
+                note = open_notes.pop(ch)
+                note.sample_off = sample
+                note_events.append(note)
+
+    # ------------------------------------------------------------------
+    # Transposition augmentation (identical to v4)
+    # ------------------------------------------------------------------
+
+    def transpose(self, tokens: list[int], semitones: int) -> list[int]:
+        if semitones == 0:
+            return list(tokens)
+        result = []
+        for tok in tokens:
+            if PITCH_BASE <= tok < PITCH_BASE + NUM_PITCHES:
+                new_tok = tok + semitones
+                new_tok = max(PITCH_BASE, min(PITCH_BASE + NUM_PITCHES - 1, new_tok))
+                result.append(new_tok)
+            elif KEY_BASE <= tok < KEY_BASE + 24:
+                offset   = tok - KEY_BASE
+                is_minor = offset >= 12
+                key_idx  = offset % 12
+                new_key  = (key_idx + semitones) % 12
+                result.append(KEY_BASE + (12 if is_minor else 0) + new_key)
+            else:
+                result.append(tok)
+        return result
