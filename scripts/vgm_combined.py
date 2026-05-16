@@ -105,7 +105,7 @@ OSC_MARGIN = 8      # px — gap between boxes / screen edges
 OSC_PAD    = 4      # px — inner padding inside box
 CHIP_H     = 15     # px — opaque title chip at top of each box
 
-APP_NAME   = "VgmLLM Combined"
+APP_NAME   = "VgmLLM"
 
 
 # ── colour helpers ─────────────────────────────────────────────────────────────
@@ -344,9 +344,14 @@ def _draw_osc_grid(
 
         label = _dynamic_title(ch, vgm_pos, dac_is_active, ch3_special_is_active)
         if font_sm:
+            # left: window width in ms (muted grey)
+            ms_str  = f"{win_n / sample_rate * 1000:.0f}ms"
+            ms_surf = font_sm.render(ms_str, True, (90, 90, 120))
+            box.blit(ms_surf, (OSC_PAD, 2))
+            # right: channel name in channel colour
             r, g, b = _hex_to_rgb(ch.color)
             txt = font_sm.render(label, True, (r, g, b))
-            box.blit(txt, (OSC_PAD, 2))
+            box.blit(txt, (inner_w - txt.get_width() - OSC_PAD, 2))
 
         surface.blit(box, (bx + 1, by + 1))
 
@@ -358,6 +363,9 @@ def _draw_header(
     title:      str,
     t:          float,
     screen_w:   int,
+    n_channels: int,
+    total_sec:  float,
+    composer:   str,
     font_hdr,
     font_mono,
 ) -> None:
@@ -375,7 +383,10 @@ def _draw_header(
     vy = bar_rect.y + bar_rect.height // 2
 
     if font_hdr:
-        label = f"{APP_NAME}  ·  {title}"
+        t_mins, t_secs = divmod(total_sec, 60)
+        meta  = f"{n_channels}ch  {int(t_mins)}:{int(t_secs):02d}"
+        by    = f"  ·  {composer}" if composer else ""
+        label = f"VgmLLM  ·  Synthesia + Oscilloscope  ·  {title}{by}  ·  {meta}"
         txt   = font_hdr.render(label, True, (190, 190, 215))
         surface.blit(txt, (bar_rect.x + 10, vy - txt.get_height() // 2))
 
@@ -398,7 +409,8 @@ def _render_combined(
     channels, pos_sample, sample_rate, vgm_pos,
     dac_is_active, ch3_special_is_active,
     window_s, autoscale, cols,
-    title, font_hdr, font_mono, font_sm, font_key,
+    title, n_channels, total_sec, composer,
+    font_hdr, font_mono, font_sm, font_key,
     no_osc: bool = False,
 ) -> None:
     """Composite one complete frame onto `surface`."""
@@ -425,7 +437,7 @@ def _render_combined(
         )
 
     # 3 – header on top of everything
-    _draw_header(surface, title, t, screen_w, font_hdr, font_mono)
+    _draw_header(surface, title, t, screen_w, n_channels, total_sec, composer, font_hdr, font_mono)
 
 
 # ── setup / WAV rendering ──────────────────────────────────────────────────────
@@ -496,7 +508,18 @@ def _prepare(args, vgm_path: Path):
     if mix_wav and mix_wav.exists():
         _, sample_rate = load_wav_mono(mix_wav)
 
-    # ── 3. Init pygame + fonts ─────────────────────────────────────────────────
+    # ── 3. GD3 metadata (composer) ────────────────────────────────────────────
+    from genesis_music.vgm_parser import load_vgm as _load_vgm
+    try:
+        _vgm = _load_vgm(vgm_path)
+        _gd3 = getattr(_vgm, "gd3", None)
+        composer = (_gd3.author_en.strip() if _gd3 and _gd3.author_en.strip() else "")
+    except Exception:
+        composer = ""
+    if composer:
+        print(f"  Composer: {composer}")
+
+    # ── 4. Init pygame + fonts ─────────────────────────────────────────────────
     import pygame
     pygame.init()
     font_hdr  = pygame.font.SysFont("segoeui",   14)
@@ -510,6 +533,7 @@ def _prepare(args, vgm_path: Path):
         white_w, black_w, piano_x0, DAC_STRIP_W,
         channels, mix_wav, sample_rate,
         dac_is_active, ch3_special_is_active,
+        composer,
         font_hdr, font_mono, font_sm, font_key,
     )
 
@@ -523,6 +547,7 @@ def _interactive(
     white_w, black_w, piano_x0, dac_strip_w,
     channels, mix_wav, sample_rate,
     dac_is_active, ch3_special_is_active,
+    composer,
     font_hdr, font_mono, font_sm, font_key,
 ):
     import pygame
@@ -585,7 +610,9 @@ def _interactive(
                 if pos_ms >= 0:
                     t = pos_ms / 1000.0
                 else:
-                    t = t_end
+                    # audio finished — advance by clock so loop condition triggers
+                    dt = clock.tick(args.fps) / 1000.0
+                    t += dt
             else:
                 dt = clock.tick(args.fps) / 1000.0
                 t += dt
@@ -596,7 +623,7 @@ def _interactive(
         else:
             clock.tick(30)
 
-        if t > t_end:
+        if t >= t_end:
             # loop back to pre-roll
             t = -args.lookahead
             audio_started = False
@@ -612,7 +639,7 @@ def _interactive(
             dac_strip_w, pitch_min, pitch_max, white_w, black_w, min_white, piano_x0,
             channels, pos_sample, sample_rate, vgm_pos,
             dac_is_active, ch3_special_is_active,
-            window_s, autoscale, OSC_COLS, title,
+            window_s, autoscale, OSC_COLS, title, len(channels), total_sec, composer,
             font_hdr, font_mono, font_sm, font_key,
             no_osc=args.no_osc,
         )
@@ -631,6 +658,7 @@ def _export_mp4(
     white_w, black_w, piano_x0, dac_strip_w,
     channels, mix_wav, sample_rate,
     dac_is_active, ch3_special_is_active,
+    composer,
     font_hdr, font_mono, font_sm, font_key,
 ):
     import pygame
@@ -688,7 +716,7 @@ def _export_mp4(
                 dac_strip_w, pitch_min, pitch_max, white_w, black_w, min_white, piano_x0,
                 channels, pos_sample, sample_rate, vgm_pos,
                 dac_is_active, ch3_special_is_active,
-                window_s, autoscale, OSC_COLS, title,
+                window_s, autoscale, OSC_COLS, title, len(channels), total_sec, composer,
                 font_hdr, font_mono, font_sm, font_key,
                 no_osc=args.no_osc,
             )
@@ -752,6 +780,7 @@ def main() -> None:
         white_w, black_w, piano_x0, dac_strip_w,
         channels, mix_wav, sample_rate,
         dac_is_active, ch3_special_is_active,
+        composer,
         font_hdr, font_mono, font_sm, font_key,
     ) = _prepare(args, vgm_path)
 
@@ -763,6 +792,7 @@ def main() -> None:
             white_w, black_w, piano_x0, dac_strip_w,
             channels, mix_wav, sample_rate,
             dac_is_active, ch3_special_is_active,
+            composer,
             font_hdr, font_mono, font_sm, font_key,
         )
     else:
@@ -773,6 +803,7 @@ def main() -> None:
             white_w, black_w, piano_x0, dac_strip_w,
             channels, mix_wav, sample_rate,
             dac_is_active, ch3_special_is_active,
+            composer,
             font_hdr, font_mono, font_sm, font_key,
         )
 
