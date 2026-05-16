@@ -442,6 +442,36 @@ def _render_combined(
 
 # ── setup / WAV rendering ──────────────────────────────────────────────────────
 
+def _build_looped_wav(src: Path, t_loop_start: float, extra_sec: float, out: Path) -> None:
+    """Append the first `extra_sec` seconds of the loop body to `src`, writing `out`.
+
+    Works at raw-bytes level (no re-encode, preserves original sample format).
+    Used to give the MP4 export gapless audio through the phantom-note tail.
+    """
+    import wave as _wave
+    with _wave.open(str(src), "rb") as wf:
+        sr      = wf.getframerate()
+        n_ch    = wf.getnchannels()
+        sw      = wf.getsampwidth()
+        n_tot   = wf.getnframes()
+        raw_all = wf.readframes(n_tot)
+
+    frame_size      = n_ch * sw
+    loop_start_fr   = int(t_loop_start * sr)
+    extra_fr        = int(extra_sec * sr)
+    loop_slice_fr   = min(extra_fr, n_tot - loop_start_fr)   # don't go past EOF
+    loop_slice_fr   = max(loop_slice_fr, 0)
+
+    loop_bytes = raw_all[loop_start_fr * frame_size :
+                         (loop_start_fr + loop_slice_fr) * frame_size]
+
+    with _wave.open(str(out), "wb") as wf:
+        wf.setnchannels(n_ch)
+        wf.setsampwidth(sw)
+        wf.setframerate(sr)
+        wf.writeframes(raw_all + loop_bytes)
+
+
 def _prepare(args, vgm_path: Path):
     """
     Parse VGM, render per-channel WAVs (cached), then initialise pygame fonts.
@@ -508,6 +538,26 @@ def _prepare(args, vgm_path: Path):
     if mix_wav and mix_wav.exists():
         _, sample_rate = load_wav_mono(mix_wav)
 
+    # ── 2b. Phantom notes + looped mix WAV (seamless loop visuals & audio) ────
+    mix_looped_wav: Optional[Path] = None
+    if t_loop_start > 0.0 and total_sec > t_loop_start:
+        loop_dur = total_sec - t_loop_start
+        phantom  = [
+            NoteRect(r.channel, r.pitch, r.t_on + loop_dur, r.t_off + loop_dur, r.color)
+            for r in rects if r.t_on >= t_loop_start
+        ]
+        rects = rects + phantom
+        print(f"  {len(phantom)} phantom notes added for seamless loop visuals")
+
+        if mix_wav and mix_wav.exists():
+            extra_sec      = args.lookahead + 1.0        # a little extra headroom
+            mix_looped_wav = wav_dir / (vgm_path.stem + "_mix_looped.wav")
+            if not mix_looped_wav.exists():
+                _build_looped_wav(mix_wav, t_loop_start, extra_sec, mix_looped_wav)
+                print(f"  Built looped mix WAV: {mix_looped_wav.name}")
+            else:
+                print(f"  [cached] {mix_looped_wav.name}")
+
     # ── 3. GD3 metadata (composer) ────────────────────────────────────────────
     from genesis_music.vgm_parser import load_vgm as _load_vgm
     try:
@@ -531,7 +581,7 @@ def _prepare(args, vgm_path: Path):
         rects, total_sec, t_loop_start,
         pitch_min, pitch_max, min_white, n_whites,
         white_w, black_w, piano_x0, DAC_STRIP_W,
-        channels, mix_wav, sample_rate,
+        channels, mix_wav, mix_looped_wav, sample_rate,
         dac_is_active, ch3_special_is_active,
         composer,
         font_hdr, font_mono, font_sm, font_key,
@@ -545,7 +595,7 @@ def _interactive(
     rects, total_sec, t_loop_start,
     pitch_min, pitch_max, min_white, n_whites,
     white_w, black_w, piano_x0, dac_strip_w,
-    channels, mix_wav, sample_rate,
+    channels, mix_wav, mix_looped_wav, sample_rate,
     dac_is_active, ch3_special_is_active,
     composer,
     font_hdr, font_mono, font_sm, font_key,
@@ -659,7 +709,7 @@ def _export_mp4(
     rects, total_sec,
     pitch_min, pitch_max, min_white, n_whites,
     white_w, black_w, piano_x0, dac_strip_w,
-    channels, mix_wav, sample_rate,
+    channels, mix_wav, mix_looped_wav, sample_rate,
     dac_is_active, ch3_special_is_active,
     composer,
     font_hdr, font_mono, font_sm, font_key,
@@ -675,7 +725,10 @@ def _export_mp4(
     window_s     = args.window
     autoscale    = not args.no_autoscale
     title        = vgm_path.stem
-    has_mix      = mix_wav is not None and mix_wav.exists()
+    # Prefer looped WAV for gapless audio; fall back to original mix
+    audio_wav = (mix_looped_wav if (mix_looped_wav and mix_looped_wav.exists())
+                 else mix_wav)
+    has_mix   = audio_wav is not None and audio_wav.exists()
 
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
@@ -691,7 +744,7 @@ def _export_mp4(
         "-i",      "pipe:0",
     ]
     if has_mix:
-        ffmpeg_cmd += ["-i", str(mix_wav)]
+        ffmpeg_cmd += ["-i", str(audio_wav)]
     ffmpeg_cmd += [
         "-vcodec",  "libx264",
         "-pix_fmt", "yuv420p",
@@ -781,7 +834,7 @@ def main() -> None:
         rects, total_sec, t_loop_start,
         pitch_min, pitch_max, min_white, n_whites,
         white_w, black_w, piano_x0, dac_strip_w,
-        channels, mix_wav, sample_rate,
+        channels, mix_wav, mix_looped_wav, sample_rate,
         dac_is_active, ch3_special_is_active,
         composer,
         font_hdr, font_mono, font_sm, font_key,
@@ -793,7 +846,7 @@ def main() -> None:
             rects, total_sec,
             pitch_min, pitch_max, min_white, n_whites,
             white_w, black_w, piano_x0, dac_strip_w,
-            channels, mix_wav, sample_rate,
+            channels, mix_wav, mix_looped_wav, sample_rate,
             dac_is_active, ch3_special_is_active,
             composer,
             font_hdr, font_mono, font_sm, font_key,
@@ -804,7 +857,7 @@ def main() -> None:
             rects, total_sec, t_loop_start,
             pitch_min, pitch_max, min_white, n_whites,
             white_w, black_w, piano_x0, dac_strip_w,
-            channels, mix_wav, sample_rate,
+            channels, mix_wav, mix_looped_wav, sample_rate,
             dac_is_active, ch3_special_is_active,
             composer,
             font_hdr, font_mono, font_sm, font_key,
