@@ -747,7 +747,8 @@ def _export_mp4(
         "-i",      "pipe:0",
     ]
     if has_mix:
-        ffmpeg_cmd += ["-i", str(audio_wav)]
+        # Delay audio by lookahead so it starts when notes reach the piano
+        ffmpeg_cmd += ["-itsoffset", f"{args.lookahead:.6f}", "-i", str(audio_wav)]
     ffmpeg_cmd += [
         "-vcodec",  "libx264",
         "-pix_fmt", "yuv420p",
