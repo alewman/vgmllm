@@ -11,10 +11,13 @@ Architecture choices for Genesis music on RTX 3090 (24 GB VRAM):
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 
 import torch
+
+log = logging.getLogger(__name__)
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint as torch_checkpoint
@@ -37,6 +40,8 @@ class ModelConfig:
     rope_theta: float = 10000.0
     tie_embeddings: bool = True  # tie token embed to output projection
     gradient_checkpointing: bool = False  # trade compute for VRAM savings
+    qk_norm: bool = False           # RMSNorm Q & K before dot product (stabilises deep runs)
+    logit_softcap: float | None = None  # Gemma-style tanh softcap; e.g. 30.0
 
     def __post_init__(self):
         if self.d_ff is None:
@@ -177,6 +182,11 @@ class Attention(nn.Module):
         self.qkv = nn.Linear(config.d_model, 3 * config.d_model, bias=False)
         self.out = nn.Linear(config.d_model, config.d_model, bias=False)
         self.dropout = nn.Dropout(config.dropout)
+        if config.qk_norm:
+            self.q_norm = RMSNorm(self.head_dim)
+            self.k_norm = RMSNorm(self.head_dim)
+        else:
+            self.q_norm = self.k_norm = None
 
     def forward(
         self,
@@ -193,6 +203,11 @@ class Attention(nn.Module):
         q = q.transpose(1, 2)  # (B, n_heads, T, head_dim)
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
+
+        # Optional QK-norm: stabilises attention logit scale in deep models
+        if self.q_norm is not None:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
 
         # Apply RoPE at correct positions
         q = _apply_rope(q, rope_freqs[start_pos:start_pos + T])
@@ -354,7 +369,17 @@ class VgmGPT(nn.Module):
             new_caches.append(new_cache)
 
         x = self.norm(x)
-        logits = self.lm_head(x)
+
+        # During cached generation (use_cache=True, no labels) we only need
+        # the last position's logits — avoid projecting the full prompt.
+        if use_cache and labels is None:
+            logits = self.lm_head(x[:, -1:, :])
+        else:
+            logits = self.lm_head(x)
+
+        if self.config.logit_softcap is not None:
+            cap = self.config.logit_softcap
+            logits = torch.tanh(logits / cap) * cap
 
         result = {"logits": logits}
 
@@ -452,10 +477,9 @@ class VgmGPT(nn.Module):
             # Top-p (nucleus) filtering
             if top_p < 1.0:
                 sorted_logits, sorted_indices = torch.sort(scaled, descending=True)
-                cumulative_probs = torch.cumsum(
-                    F.softmax(sorted_logits, dim=-1), dim=-1
-                )
-                remove_mask = cumulative_probs - F.softmax(sorted_logits, dim=-1) >= top_p
+                probs_sorted = F.softmax(sorted_logits, dim=-1)
+                cumulative_probs = torch.cumsum(probs_sorted, dim=-1)
+                remove_mask = cumulative_probs - probs_sorted >= top_p
                 sorted_logits[remove_mask] = float("-inf")
                 scaled = sorted_logits.scatter(1, sorted_indices, sorted_logits)
 
@@ -487,15 +511,15 @@ def config_small(vocab_size: int = 4096, seq_len: int = 4096) -> ModelConfig:
     """Small model (~25M params) for quick experiments."""
     return ModelConfig(
         vocab_size=vocab_size, seq_len=seq_len,
-        n_layers=8, n_heads=8, d_model=512, dropout=0.1,
+        n_layers=8, n_heads=8, d_model=512, dropout=0.0,
     )
 
 
-def config_medium(vocab_size: int = 4096, seq_len: int = 4096) -> ModelConfig:
+def config_medium(vocab_size: int = 4096, seq_len: int = 8192) -> ModelConfig:
     """Medium model (~55M params) — good balance for RTX 3090."""
     return ModelConfig(
         vocab_size=vocab_size, seq_len=seq_len,
-        n_layers=16, n_heads=12, d_model=768, dropout=0.1,
+        n_layers=16, n_heads=12, d_model=768, dropout=0.0,
     )
 
 
@@ -503,9 +527,5 @@ def config_large(vocab_size: int = 4096, seq_len: int = 8192) -> ModelConfig:
     """Large model (~85M params) — pushes RTX 3090 VRAM limits."""
     return ModelConfig(
         vocab_size=vocab_size, seq_len=seq_len,
-        n_layers=20, n_heads=16, d_model=1024, dropout=0.1,
+        n_layers=20, n_heads=16, d_model=1024, dropout=0.0,
     )
-
-
-import logging
-log = logging.getLogger(__name__)

@@ -47,6 +47,9 @@ OPUS_HANDOFF*.md
 data/*.txt
 data/*.csv
 
+# Dev survey / throwaway notes at repo root
+survey_results.txt
+
 # Model weights (safety net — runs/ already excluded above)
 *.pt
 *.pth

@@ -1,4 +1,10 @@
-"""v2 Tokenizer for VGM event sequences.
+"""v2 Tokenizer for VGM event sequences (legacy — superseded by v4/v6).
+
+.. deprecated::
+    Superseded by ``tokenizer_v4.py`` and ``tokenizer_v6.py``.  Kept for
+    reference and reproducibility only.
+
+.. rubric:: Original docstring
 
 Key improvement over v1: YM2612 frequency register writes and Key On/Off
 events are abstracted to musical note tokens (e.g. CH1:ON:C4, CH3:OFF)

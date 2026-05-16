@@ -44,7 +44,7 @@ class TrainConfig:
     lr: float = 3e-4
     min_lr: float = 1e-5
     weight_decay: float = 0.1
-    warmup_steps: int = 500
+    warmup_steps: int = 2000
     grad_clip: float = 1.0
 
     # Model (overridden by preset)
@@ -61,8 +61,11 @@ class TrainConfig:
 
     # Hardware
     num_workers: int = 2
-    compile_model: bool = True         # torch.compile for speedup
+    compile_model: bool = False        # torch.compile for speedup (broken on Windows)
     gradient_checkpointing: bool = False  # trade compute for VRAM
+
+    # Stability
+    z_loss: float = 0.0   # PaLM-style z-loss weight (λ≈1e-4); 0.0 = off
 
 
 def _get_lr(step: int, config: TrainConfig) -> float:
@@ -218,11 +221,18 @@ def train(config: TrainConfig):
     if ckpt_path.exists():
         log.info("Resuming from %s", ckpt_path)
         ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
-        # Handle compiled model state dict
         state_dict = ckpt["model"]
+        # Normalise: if checkpoint was saved from a compiled model, strip the
+        # _orig_mod. prefix so we can always load into the plain (uncompiled) model.
         if any(k.startswith("_orig_mod.") for k in state_dict):
             state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
-        model.load_state_dict(state_dict, strict=False)
+        try:
+            model.load_state_dict(state_dict, strict=True)
+        except RuntimeError as e:
+            log.error(
+                "Checkpoint key mismatch — model config and checkpoint don't agree: %s", e
+            )
+            raise
         optimizer.load_state_dict(ckpt["optimizer"])
         scaler.load_state_dict(ckpt["scaler"])
         start_step = ckpt["step"] + 1
@@ -268,7 +278,12 @@ def train(config: TrainConfig):
                 loss = out["loss"] / config.grad_accum_steps
 
             micro_loss = loss.item() * config.grad_accum_steps  # unnormalized
-            spike_threshold = max(8.0, loss_ema * 5.0) if loss_ema is not None else 8.0
+            # Use ln(vocab_size)+2 as the floor for the first steps, before loss_ema
+            # is seeded.  Without this, any vocab larger than ~e^6 (≈3000 tokens)
+            # would trip the 8.0 hard floor on every early micro-step, preventing
+            # the EMA from ever being populated and blocking all learning.
+            init_floor = math.log(vocab_size) + 2.0
+            spike_threshold = max(init_floor, loss_ema * 5.0) if loss_ema is not None else init_floor
             if micro_loss > spike_threshold:
                 spike_detected = True
                 log.warning(
@@ -280,14 +295,25 @@ def train(config: TrainConfig):
             scaler.scale(loss).backward()
             accum_loss += loss.item()
 
+        # Optional z-loss: penalises unnormalized logit scale (PaLM, λ≈1e-4).
+        # Keeps the softmax partition function from drifting, which is one cause
+        # of training instability in large vocabularies.
+        if config.z_loss > 0.0 and not spike_detected:
+            with torch.amp.autocast("cuda", dtype=dtype):
+                # Re-compute logits for last micro-batch's input (cheap: no backward yet)
+                with torch.no_grad():
+                    last_logits = model(input_ids)["logits"]
+                z = torch.logsumexp(last_logits.float(), dim=-1).pow(2).mean()
+            (config.z_loss * z).backward()
+
         # Gradient clipping
         scaler.unscale_(optimizer)
         grad_norm = nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
 
-        # Grad norm guard: post-clip norm should be <= grad_clip by definition,
-        # but bfloat16 overflow or a severely corrupted batch can produce
-        # non-finite or astronomically large norms even after clipping.
-        # If norm > 100 after clipping, skip the optimizer step entirely.
+        # clip_grad_norm_ returns the *pre-clipping* total gradient norm.
+        # If that value is non-finite (NaN/Inf from bf16 overflow) or
+        # astronomically large (> 100), something is wrong beyond normal
+        # training variance and we skip the optimizer step entirely.
         grad_norm_ok = grad_norm.isfinite() and grad_norm < 100.0
 
         if spike_detected or not grad_norm_ok:
@@ -398,14 +424,17 @@ def main():
     parser.add_argument("--grad-accum", type=int, default=8)
     parser.add_argument("--max-steps", type=int, default=50000)
     parser.add_argument("--lr", type=float, default=3e-4)
-    parser.add_argument("--warmup", type=int, default=500)
+    parser.add_argument("--warmup", type=int, default=2000)
     parser.add_argument("--val-interval", type=int, default=500)
     parser.add_argument("--save-interval", type=int, default=2000)
-    parser.add_argument("--no-compile", action="store_true")
+    parser.add_argument("--compile", action="store_true",
+                        help="Enable torch.compile (not supported on Windows)")
     parser.add_argument("--gradient-checkpointing", action="store_true",
                         help="Enable gradient checkpointing to reduce VRAM")
     parser.add_argument("--tokenizer", choices=["v3", "v4"], default="v3",
                         help="Which tokenizer/vocab the data was prepared with")
+    parser.add_argument("--z-loss", type=float, default=0.0,
+                        help="PaLM z-loss weight (e.g. 1e-4); 0 = off")
 
     args = parser.parse_args()
 
@@ -421,9 +450,10 @@ def main():
         warmup_steps=args.warmup,
         val_interval=args.val_interval,
         save_interval=args.save_interval,
-        compile_model=not args.no_compile,
+        compile_model=args.compile,
         gradient_checkpointing=args.gradient_checkpointing,
         tokenizer=args.tokenizer,
+        z_loss=args.z_loss,
     )
 
     train(config)

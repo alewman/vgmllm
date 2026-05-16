@@ -1,4 +1,10 @@
-"""Tokenizer for VGM event sequences.
+"""Tokenizer for VGM event sequences (v3 — legacy).
+
+.. deprecated::
+    This is the v3 (data-driven, large-vocab) tokenizer used for the original
+    proof-of-concept training runs.  New work should use ``tokenizer_v6.py``
+    which uses a smaller, lossless musical-concept vocabulary (~660 tokens).
+    This module is kept for reproducibility of v3 checkpoints.
 
 Converts VGM events (register writes, waits, DAC) into integer token
 sequences suitable for transformer training, and decodes them back.
