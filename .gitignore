@@ -27,3 +27,28 @@ Thumbs.db
 # Misc
 *.log
 .pytest_cache/
+
+# Debug / throwaway scripts (prefix _ at root or in scripts/)
+_debug_*.py
+_regen_*.py
+_scan_*.py
+_compare_*.py
+_inspect_*.py
+_analyze_*.py
+check_*.py
+stats_check.py
+keep_awake.py
+
+# Internal session / handoff notes
+OPUS_HANDOFF*.md
+*_HANDOFF_*.md
+
+# Data run artifacts
+data/*.txt
+data/*.csv
+
+# Model weights (safety net — runs/ already excluded above)
+*.pt
+*.pth
+*.ckpt
+*.safetensors
