@@ -279,6 +279,7 @@ def _draw_osc_grid(
     dac_is_active,
     ch3_special_is_active,
     font_sm,
+    music_started:        bool = True,
 ) -> None:
     """Overlay a grid of compact oscilloscope boxes on the surface."""
     import pygame
@@ -314,7 +315,8 @@ def _draw_osc_grid(
                          (OSC_PAD, cy), (inner_w - OSC_PAD, cy), 1)
 
         # ── oscilloscope trace ─────────────────────────────────────────────────
-        if ch.audio is not None and len(ch.audio) > 0:
+        win_n = default_win   # default, may be updated below
+        if music_started and ch.audio is not None and len(ch.audio) > 0:
             if autoscale:
                 win_n = adaptive_window_samples(
                     ch.audio, pos_sample, sample_rate, default_samples=default_win)
@@ -434,6 +436,7 @@ def _render_combined(
             grid_x, grid_y, grid_w, cols,
             window_s, autoscale, vgm_pos,
             dac_is_active, ch3_special_is_active, font_sm,
+            music_started=(t >= 0),
         )
 
     # 3 – header on top of everything
