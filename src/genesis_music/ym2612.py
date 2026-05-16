@@ -755,9 +755,22 @@ class Sn76489State:
                 # that sub-semitone vibrato (which rounds to the same MIDI note)
                 # is faithfully preserved through the round-trip.
                 if ch.open_note is not None:
-                    new_period = ch.period
-                    if not ch.open_note.pitch_envelope or ch.open_note.pitch_envelope[-1][1] != new_period:
-                        ch.open_note.pitch_envelope.append((self._current_sample, new_period))
+                    new_pitch = ch.psg_pitch()
+                    if new_pitch >= 0 and new_pitch != ch.open_note.pitch:
+                        # Pitch changed while note is held → close old note, open new one
+                        ch.open_note.sample_off = self._current_sample
+                        yield ch.open_note
+                        ch_id = CH_PSG_0 + self._latch_channel
+                        ch.open_note = NoteEvent(
+                            channel   = ch_id,
+                            pitch     = new_pitch,
+                            velocity  = ch.psg_velocity(),
+                            sample_on = self._current_sample,
+                        )
+                    else:
+                        new_period = ch.period
+                        if not ch.open_note.pitch_envelope or ch.open_note.pitch_envelope[-1][1] != new_period:
+                            ch.open_note.pitch_envelope.append((self._current_sample, new_period))
 
     def _update_volume(
         self, ch_idx: int, ch: _PsgChannelState, new_vol: int
