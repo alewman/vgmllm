@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "genesis-music-ml"
+name = "vgmllm"
 version = "0.1.0"
-description = "ML model for generating Sega Genesis / Mega Drive music via YM2612 register writes in VGM format"
+description = "VgmLLM: AI model for generating Sega Genesis / Mega Drive music via YM2612 register writes in VGM format"
 requires-python = ">=3.10"
 dependencies = [
     "torch>=2.0",
@@ -24,11 +24,11 @@ dev = [
 ]
 
 [project.scripts]
-vgm-pipeline = "genesis_music.data_pipeline:main"
-vgm-tokenizer = "genesis_music.tokenizer:main"
-vgm-dataset = "genesis_music.dataset:main"
-vgm-train = "genesis_music.train:main"
-vgm-generate = "genesis_music.generate:main"
+vgmllm-pipeline  = "genesis_music.data_pipeline:main"
+vgmllm-tokenizer = "genesis_music.tokenizer:main"
+vgmllm-dataset   = "genesis_music.dataset:main"
+vgmllm-train     = "genesis_music.train:main"
+vgmllm-generate  = "genesis_music.generate:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/genesis_music"]

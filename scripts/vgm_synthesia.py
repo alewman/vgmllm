@@ -57,10 +57,10 @@ CHANNEL_COLORS: dict[int, tuple[int, int, int]] = {
     4:            ( 68, 136, 255),   # FM5  blue
     5:            (204,  68, 255),   # FM6  purple
     CH_DAC:       (255,  68, 170),   # DAC  pink
-    CH_PSG_0:     (255, 224, 178),   # PSG1 peach
-    CH_PSG_1:     (179, 229, 252),   # PSG2 light blue
-    CH_PSG_2:     (200, 230, 201),   # PSG3 mint
-    CH_PSG_NOISE: (144, 164, 174),   # Noise blue-grey
+    CH_PSG_0:     (220, 140,  50),   # PSG1 amber
+    CH_PSG_1:     ( 60, 160, 220),   # PSG2 sky blue
+    CH_PSG_2:     ( 60, 180,  90),   # PSG3 green
+    CH_PSG_NOISE: ( 90, 120, 150),   # Noise slate
 }
 
 CHANNEL_NAMES: dict[int, str] = {

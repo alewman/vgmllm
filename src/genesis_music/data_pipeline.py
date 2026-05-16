@@ -94,7 +94,7 @@ SCRAPE_DELAY = 1.5   # seconds between page fetches
 DOWNLOAD_DELAY = 2.0  # seconds between file downloads
 
 HEADERS = {
-    "User-Agent": "genesis-music-ml/0.1 (research dataset collection)",
+    "User-Agent": "vgmllm/0.1 (research dataset collection)",
 }
 
 

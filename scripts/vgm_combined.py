@@ -386,7 +386,7 @@ def _draw_header(
 
     if font_hdr:
         t_mins, t_secs = divmod(total_sec, 60)
-        meta  = f"{n_channels}ch  {int(t_mins)}:{int(t_secs):02d}"
+        meta  = f"{n_channels}ch  ·  {int(t_mins)}:{int(t_secs):02d}"
         by    = f"  ·  {composer}" if composer else ""
         label = f"VgmLLM  ·  Synthesia + Oscilloscope  ·  {title}{by}  ·  {meta}"
         txt   = font_hdr.render(label, True, (190, 190, 215))
@@ -394,7 +394,7 @@ def _draw_header(
 
     if font_mono:
         mins, secs = divmod(max(t, 0.0), 60)
-        ts_str  = f"{int(mins)}:{secs:06.3f}"
+        ts_str  = f"Aubrey Lewman  ·  {int(mins)}:{secs:06.3f}"
         ts_surf = font_mono.render(ts_str, True, (140, 140, 165))
         tx = bar_rect.right - ts_surf.get_width() - 10
         surface.blit(ts_surf, (tx, vy - ts_surf.get_height() // 2))
@@ -562,14 +562,16 @@ def _prepare(args, vgm_path: Path):
             else:
                 print(f"  [cached] {mix_looped_wav.name}")
 
-    # ── 3. GD3 metadata (composer) ────────────────────────────────────────────
+    # ── 3. GD3 metadata (title + composer) ─────────────────────────────────────
     from genesis_music.vgm_parser import load_vgm as _load_vgm
     try:
         _vgm = _load_vgm(vgm_path)
         _gd3 = getattr(_vgm, "gd3", None)
-        composer = (_gd3.author_en.strip() if _gd3 and _gd3.author_en.strip() else "")
+        composer    = (_gd3.author_en.strip()     if _gd3 and _gd3.author_en.strip()     else "")
+        track_title = (_gd3.track_name_en.strip() if _gd3 and _gd3.track_name_en.strip() else vgm_path.stem)
     except Exception:
-        composer = ""
+        composer    = ""
+        track_title = vgm_path.stem
     if composer:
         print(f"  Composer: {composer}")
 
@@ -587,7 +589,7 @@ def _prepare(args, vgm_path: Path):
         white_w, black_w, piano_x0, DAC_STRIP_W,
         channels, mix_wav, mix_looped_wav, sample_rate,
         dac_is_active, ch3_special_is_active,
-        composer,
+        composer, track_title,
         font_hdr, font_mono, font_sm, font_key,
     )
 
@@ -601,13 +603,13 @@ def _interactive(
     white_w, black_w, piano_x0, dac_strip_w,
     channels, mix_wav, mix_looped_wav, sample_rate,
     dac_is_active, ch3_special_is_active,
-    composer,
+    composer, track_title,
     font_hdr, font_mono, font_sm, font_key,
 ):
     import pygame
 
     screen = pygame.display.set_mode((args.width, args.height))
-    pygame.display.set_caption(f"{APP_NAME} — {vgm_path.stem}")
+    pygame.display.set_caption(f"{APP_NAME} — {track_title}")
     clock = pygame.time.Clock()
 
     has_audio = mix_wav is not None and mix_wav.exists()
@@ -617,7 +619,7 @@ def _interactive(
 
     window_s  = args.window
     autoscale = not args.no_autoscale
-    title     = vgm_path.stem
+    title     = track_title
 
     t         = -args.lookahead
     t_end     = total_sec + 1.0
@@ -715,7 +717,7 @@ def _export_mp4(
     white_w, black_w, piano_x0, dac_strip_w,
     channels, mix_wav, mix_looped_wav, sample_rate,
     dac_is_active, ch3_special_is_active,
-    composer,
+    composer, track_title,
     font_hdr, font_mono, font_sm, font_key,
 ):
     import pygame
@@ -730,7 +732,7 @@ def _export_mp4(
     total_frames = int((total_sec + loop_dur + args.lookahead) * args.fps)
     window_s     = args.window
     autoscale    = not args.no_autoscale
-    title        = vgm_path.stem
+    title        = track_title
     # Prefer looped WAV for gapless audio; fall back to original mix
     audio_wav = (mix_looped_wav if (mix_looped_wav and mix_looped_wav.exists())
                  else mix_wav)
@@ -843,7 +845,7 @@ def main() -> None:
         white_w, black_w, piano_x0, dac_strip_w,
         channels, mix_wav, mix_looped_wav, sample_rate,
         dac_is_active, ch3_special_is_active,
-        composer,
+        composer, track_title,
         font_hdr, font_mono, font_sm, font_key,
     ) = _prepare(args, vgm_path)
 
@@ -855,7 +857,7 @@ def main() -> None:
             white_w, black_w, piano_x0, dac_strip_w,
             channels, mix_wav, mix_looped_wav, sample_rate,
             dac_is_active, ch3_special_is_active,
-            composer,
+            composer, track_title,
             font_hdr, font_mono, font_sm, font_key,
         )
     else:
@@ -866,7 +868,7 @@ def main() -> None:
             white_w, black_w, piano_x0, dac_strip_w,
             channels, mix_wav, mix_looped_wav, sample_rate,
             dac_is_active, ch3_special_is_active,
-            composer,
+            composer, track_title,
             font_hdr, font_mono, font_sm, font_key,
         )
 
