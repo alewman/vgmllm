@@ -4,7 +4,7 @@ import math
 import pytest
 
 from genesis_music.ym2612 import (
-    CH_DAC, CH_FM_0, CH_PSG_0, CH_PSG_NOISE,
+    CH_DAC, CH_FM_0, CH_FM_5, CH_PSG_0, CH_PSG_NOISE,
     NoteEvent, Ym2612Patch, Ym2612State, Sn76489State,
     fnumber_to_midi, midi_to_fnumber, freq_to_midi, optimal_block,
     decode_vgm,
@@ -163,6 +163,63 @@ class TestYm2612State:
         notes = list(decoder.process_vgm(vgm))
         dac_notes = [e for e in notes if e.channel == CH_DAC]
         assert len(dac_notes) >= 1
+
+    def test_fm6_key_on_suppressed_when_dac_enabled(self):
+        # FM6 = channel index 5. Key-on while DAC enabled → no NoteEvent.
+        fnum_lo = midi_to_fnumber(69, 4) & 0xFF
+        fnum_hi = ((4 << 3) | (midi_to_fnumber(69, 4) >> 8)) & 0xFF
+        events_list = [
+            _fm0(0x2B, 0x80),             # DAC enable
+            _fm1(0xA2, fnum_lo),          # FM6 F-number lo (port1, ch_offset=2)
+            _fm1(0xA6, fnum_hi),          # FM6 F-number hi
+            _fm0(0x28, 0xF6),             # key on FM6 (0x28, ch_bits=6 → ch_idx=5)
+            _wait(4410),
+            _fm0(0x28, 0x06),             # key off FM6
+            _end(),
+        ]
+        vgm = _make_vgm(events_list)
+        decoder = Ym2612State()
+        notes = list(decoder.process_vgm(vgm))
+        fm6_notes = [e for e in notes if e.channel == CH_FM_5]
+        assert len(fm6_notes) == 0, "FM6 key-on while DAC enabled should produce no NoteEvent"
+
+    def test_fm6_key_on_works_when_dac_disabled(self):
+        # FM6 key-on while DAC is disabled → NoteEvent emitted normally.
+        fnum_lo = midi_to_fnumber(69, 4) & 0xFF
+        fnum_hi = ((4 << 3) | (midi_to_fnumber(69, 4) >> 8)) & 0xFF
+        events_list = [
+            _fm1(0xA2, fnum_lo),
+            _fm1(0xA6, fnum_hi),
+            _fm0(0x28, 0xF6),             # key on FM6, DAC not enabled
+            _wait(4410),
+            _fm0(0x28, 0x06),
+            _end(),
+        ]
+        vgm = _make_vgm(events_list)
+        decoder = Ym2612State()
+        notes = list(decoder.process_vgm(vgm))
+        fm6_notes = [e for e in notes if e.channel == CH_FM_5]
+        assert len(fm6_notes) >= 1, "FM6 key-on while DAC disabled should emit NoteEvent"
+
+    def test_dac_enable_closes_open_fm6_note(self):
+        # FM6 note opened with DAC off; turning DAC on should close it.
+        fnum_lo = midi_to_fnumber(69, 4) & 0xFF
+        fnum_hi = ((4 << 3) | (midi_to_fnumber(69, 4) >> 8)) & 0xFF
+        events_list = [
+            _fm1(0xA2, fnum_lo),
+            _fm1(0xA6, fnum_hi),
+            _fm0(0x28, 0xF6),             # key on FM6 (DAC off)
+            _wait(2205),
+            _fm0(0x2B, 0x80),             # DAC on → closes FM6 note
+            _wait(2205),
+            _end(),
+        ]
+        vgm = _make_vgm(events_list)
+        decoder = Ym2612State()
+        notes = list(decoder.process_vgm(vgm))
+        fm6_notes = [e for e in notes if e.channel == CH_FM_5 and e.sample_off >= 0]
+        assert len(fm6_notes) >= 1, "FM6 note should be closed when DAC is enabled"
+        assert fm6_notes[0].sample_off == 2205, "FM6 note should close at DAC-enable sample"
 
     def test_patch_extracted(self):
         ch_idx = 0

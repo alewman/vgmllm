@@ -1,4 +1,4 @@
-"""v6 tokenizer — lossless FM patch encoding.
+"""v6 tokenizer — lossless FM patch encoding + structured metadata header.
 
 Identical to v4 except the per-channel header stores every FM operator
 parameter directly as tokens instead of a 128-entry library lookup ID.
@@ -6,11 +6,9 @@ This eliminates the timbre quantisation error that caused "harpsichord"
 artefacts in v4 roundtrips: the exact patch is preserved in the token
 stream so synthesise_vgm() always has perfect register values.
 
-Vocabulary: 660 tokens (456 v4 tokens + 204 new FM parameter tokens).
+Vocabulary: 794 tokens (660 original v6 + 134 new metadata tokens).
 
-New token ranges (all appended after v4 vocab, backward-incompatible
-with v4 but the note-stream tokens are identical so the musical content
-is the same):
+FM parameter token ranges (appended after v4 vocab):
 
   IDs 456–463  FM_ALG_BASE   algorithm 0–7
   IDs 464–471  FM_P8_BASE    8-value range (feedback, detune)
@@ -20,9 +18,20 @@ is the same):
   IDs 612–643  FM_AR32_BASE  5-bit range (ar, dr, sr 0–31)
   IDs 644–659  FM_P16_BASE   4-bit range (rr, sl, mul 0–15)
 
+New metadata token ranges:
+
+  IDs 660–787  GAME_BASE     game title ID 0–127
+  IDs 788      UNK_GAME
+  IDs 789–793  CTX_*         track context (LEVEL/BOSS/TITLE/CREDITS/GAMEOVER)
+
 Per-FM-channel header block (40 tokens):
   ALG, FB, AMS, FMS,
   [TL, AR, DR, SR, RR, SL, MUL, DT, KS] × 4 operators
+
+Token stream order:
+  BOS, TEMPO, KEY, METER, COMPOSER, GAME, CTX,
+  [CH_tok, ROLE_tok, [40 FM params]] × active channels,
+  note stream …, EOS
 
 Usage::
 
@@ -69,7 +78,7 @@ log = logging.getLogger(__name__)
 # IDs 20–43  Key (24: 12 major + 12 minor)
 # IDs 44–47  Meter
 # IDs 48     BAR
-# IDs 49–64  BEAT_0 … BEAT_15 (16th-note positions)
+# IDs 49–64  BEAT_0 … BEAT_15 (16th-note positions within a bar)
 # IDs 65     PHRASE_END
 # IDs 66–71  CH_FM_0 … CH_FM_5
 # IDs 72     CH_DAC_TOK
@@ -90,7 +99,17 @@ log = logging.getLogger(__name__)
 # IDs 484–611 FM_TL_BASE    total level 0–127
 # IDs 612–643 FM_AR32_BASE  5-bit range: ar, dr, sr 0–31
 # IDs 644–659 FM_P16_BASE   4-bit range: rr, sl, mul 0–15
-# VOCAB_SIZE  660
+# IDs 660–723 GAME_BASE     game title 0–63  (top 64 games; ≥34 tracks)
+# IDs 724    UNK_GAME
+# IDs 725    CTX_LEVEL  (default: stage/level music)
+# IDs 726    CTX_BOSS
+# IDs 727    CTX_TITLE
+# IDs 728    CTX_CREDITS
+# IDs 729    CTX_GAMEOVER
+# IDs 730    LOOP_PRESENT  (VGM loop_offset != 0)
+# IDs 731    LOOP_ABSENT
+# IDs 732    CTX_UNKNOWN   (uninformative / missing track name)
+# VOCAB_SIZE  733
 # ---------------------------------------------------------------------------
 
 PAD = 0
@@ -158,7 +177,26 @@ FM_P16_BASE  = 644   # 4-bit range 0–15     (16 tokens)  rr, sl, mul
 
 FM_PATCH_TOKENS = 40  # tokens per FM channel in header
 
-VOCAB_SIZE = 660
+# ---------------------------------------------------------------------------
+# Game map and track-context tokens  (new in v6.1)
+# ---------------------------------------------------------------------------
+
+GAME_BASE    = 660   # game title ID 0–63  (top-64 games; ≥34 tracks each)
+NUM_GAMES    = 64
+UNK_GAME     = GAME_BASE + NUM_GAMES         # 724
+
+CTX_BASE     = 725   # track context tokens (6 tokens)
+CTX_LEVEL    = 725   # default: in-level / stage music
+CTX_BOSS     = 726   # boss encounter
+CTX_TITLE    = 727   # title screen / menu
+CTX_CREDITS  = 728   # staff roll / ending / credits
+CTX_GAMEOVER = 729   # game over / continue
+CTX_UNKNOWN  = 732   # uninformative / missing / all-non-ASCII track name
+
+LOOP_PRESENT = 730   # VGM loop_offset != 0  (track loops)
+LOOP_ABSENT  = 731   # no loop
+
+VOCAB_SIZE = 733
 
 
 # ---------------------------------------------------------------------------
@@ -208,6 +246,93 @@ def _fast_read_author(path: Path) -> str:
         return author_en.strip()
     except Exception:
         return ''
+
+
+_GD3_REGION_RE = re.compile(
+    r'\s*\((japan|usa|us|europe|world|rev\s*[a-z0-9]+|[jue][^)]*)\)\s*$',
+    re.IGNORECASE,
+)
+
+
+def _fast_read_gd3_fields(path: Path, *field_indices: int) -> list[str]:
+    """Read GD3 text fields by 0-based index from a VGM/VGZ without full parse.
+
+    Field order: 0=track_name_en, 1=track_name_jp, 2=game_name_en,
+                 3=game_name_jp, 4=system_en, 5=system_jp, 6=author_en, …
+    Returns a list (one entry per requested index); missing fields return ''.
+    """
+    result = [''] * len(field_indices)
+    if not field_indices:
+        return result
+    try:
+        raw = path.read_bytes()
+        if path.suffix.lower() == '.vgz':
+            raw = gzip.decompress(raw)
+        if len(raw) < 0x20 or raw[:4] != b'Vgm ':
+            return result
+        gd3_rel = struct.unpack_from('<I', raw, 0x14)[0]
+        if gd3_rel == 0:
+            return result
+        gd3_abs = gd3_rel + 0x14
+        if gd3_abs + 12 > len(raw) or raw[gd3_abs:gd3_abs + 4] != b'Gd3 ':
+            return result
+        pos = gd3_abs + 12
+        idx_to_slot = {idx: slot for slot, idx in enumerate(field_indices)}
+        max_field = max(field_indices)
+        for field_i in range(max_field + 1):
+            chars: list[str] = []
+            while pos + 1 < len(raw):
+                cp = struct.unpack_from('<H', raw, pos)[0]
+                pos += 2
+                if cp == 0:
+                    break
+                chars.append(chr(cp))
+            if field_i in idx_to_slot:
+                result[idx_to_slot[field_i]] = ''.join(chars).strip()
+    except Exception:
+        pass
+    return result
+
+
+def _normalize_game_name(raw: str) -> str:
+    """Lowercase and strip trailing region suffixes for consistent matching."""
+    return _GD3_REGION_RE.sub('', raw.strip()).lower().strip()
+
+
+def infer_track_context(track_name: str) -> int:
+    """Map a GD3 track_name_en → one of the CTX_* tokens via keyword heuristics."""
+    stripped = track_name.strip()
+
+    # Trivially uninformative: empty, all-numeric, or very short
+    if len(stripped) < 3 or stripped.isdigit():
+        return CTX_UNKNOWN
+
+    # Japanese keyword patterns (before the all-non-ASCII gate)
+    if re.search(r'\u30dc\u30b9|\u30d5\u30a1\u30a4\u30c8', stripped):      # ボス|ファイト
+        return CTX_BOSS
+    if re.search(r'\u30bf\u30a4\u30c8\u30eb|\u30aa\u30fc\u30d7\u30cb\u30f3\u30b0', stripped):  # タイトル|オープニング
+        return CTX_TITLE
+    if re.search(r'\u30a8\u30f3\u30c7\u30a3\u30f3\u30b0|\u30b9\u30bf\u30c3\u30d5', stripped):  # エンディング|スタッフ
+        return CTX_CREDITS
+    if re.search(r'\u30b2\u30fc\u30e0\u30aa\u30fc\u30d0\u30fc', stripped):  # ゲームオーバー
+        return CTX_GAMEOVER
+
+    # All-non-ASCII with no matched keywords: uninformative
+    if all(ord(c) > 127 for c in stripped if not c.isspace()):
+        return CTX_UNKNOWN
+
+    name = stripped.lower()
+
+    # English keyword patterns
+    if re.search(r'\b(boss|battle|fight|combat|versus|vs\.?)\b', name):
+        return CTX_BOSS
+    if re.search(r'\b(title|opening|intro|name\s*entry|player\s*select|character\s*select)\b', name):
+        return CTX_TITLE
+    if re.search(r'\b(staff|ending|credit|outro|epilogue|fin(?:ale?)?)\b', name):
+        return CTX_CREDITS
+    if re.search(r'\b(game\s*over|continue|death)\b', name):
+        return CTX_GAMEOVER
+    return CTX_LEVEL
 
 
 def tempo_to_token(bpm: float) -> int:
@@ -383,6 +508,70 @@ class ComposerMap:
 
 
 # ---------------------------------------------------------------------------
+# GameMap
+# ---------------------------------------------------------------------------
+
+class GameMap:
+    """Maps game title strings → GAME_* token IDs (660–787) or UNK_GAME (788).
+
+    Built once from the corpus GD3 game_name_en tags, keeping the top-N
+    games by track count.  Region suffixes are normalised so
+    "Sonic The Hedgehog (Japan)" and "Sonic The Hedgehog (US)" count as
+    the same entry.  The stored names are the normalised (lowercased,
+    region-stripped) forms used for lookup.
+    """
+
+    def __init__(self, games: list[str]) -> None:
+        self.games: list[str] = games[:NUM_GAMES]
+        self._lookup: dict[str, int] = {
+            _normalize_game_name(g): GAME_BASE + i
+            for i, g in enumerate(self.games)
+        }
+
+    def lookup(self, raw_game: str) -> int:
+        if not raw_game:
+            return UNK_GAME
+        tok = self._lookup.get(_normalize_game_name(raw_game))
+        return tok if tok is not None else UNK_GAME
+
+    def name(self, token_id: int) -> str:
+        idx = token_id - GAME_BASE
+        if 0 <= idx < len(self.games):
+            return self.games[idx]
+        return "Unknown"
+
+    def __len__(self) -> int:
+        return len(self.games)
+
+    def save(self, path: str | Path) -> None:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"games": self.games}, indent=2))
+
+    @classmethod
+    def load(cls, path: str | Path) -> "GameMap":
+        data = json.loads(Path(path).read_text())
+        return cls(data["games"])
+
+    @classmethod
+    def build(cls, vgm_files: Sequence, top_n: int = NUM_GAMES) -> "GameMap":
+        """Build a GameMap by scanning GD3 game_name_en tags in the corpus."""
+        counter: Counter[str] = Counter()
+        for item in vgm_files:
+            if hasattr(item, 'gd3'):
+                gd3 = getattr(item, 'gd3', None)
+                raw = gd3.game_name_en.strip() if gd3 else ''
+            else:
+                fields = _fast_read_gd3_fields(Path(str(item)), 2)
+                raw = fields[0]
+            norm = _normalize_game_name(raw)
+            if norm and norm not in ('unknown', ''):
+                counter[norm] += 1
+        top = [name for name, _ in counter.most_common(top_n)]
+        return cls(top)
+
+
+# ---------------------------------------------------------------------------
 # TokenizerV6
 # ---------------------------------------------------------------------------
 
@@ -407,12 +596,14 @@ class TokenizerV6:
 
     def __init__(
         self,
-        composer_map: ComposerMap | None = None,
+        composer_map: "ComposerMap | None" = None,
+        game_map: "GameMap | None" = None,
         beats_per_bar: int = 4,
         subdivisions: int = 16,
         dac_slot_map: dict[int, int] | None = None,
     ) -> None:
         self.composer_map  = composer_map
+        self.game_map      = game_map
         self.beats_per_bar = beats_per_bar
         self.subdivisions  = subdivisions
         self._dac_slot_map: dict[int, int] = dac_slot_map or {}
@@ -475,15 +666,36 @@ class TokenizerV6:
         # ---- Global header ----
         tokens.append(tempo_to_token(analysis.tempo_bpm))
         tokens.append(key_to_token(analysis.key_index, analysis.is_minor))
-        tokens.append(METER_44)
+        # Meter: use detected time signature rather than hardcoding 4/4
+        _meter_tok_map = {
+            (4, 4): METER_44, (3, 4): METER_34,
+            (6, 8): METER_68, (2, 4): METER_24,
+        }
+        tokens.append(_meter_tok_map.get(
+            (analysis.meter_numerator, analysis.meter_denominator), METER_44))
 
         # ---- Composer ----
+        gd3 = getattr(vgm, 'gd3', None)
         if self.composer_map is not None:
-            gd3 = getattr(vgm, 'gd3', None)
             raw_author = gd3.author_en.strip() if gd3 else ''
             tokens.append(self.composer_map.lookup(raw_author))
         else:
             tokens.append(UNK_COMPOSER)
+
+        # ---- Game ----
+        if self.game_map is not None:
+            raw_game = gd3.game_name_en.strip() if gd3 else ''
+            tokens.append(self.game_map.lookup(raw_game))
+        else:
+            tokens.append(UNK_GAME)
+
+        # ---- Track context (rule-based from GD3 track name) ----
+        raw_track = gd3.track_name_en.strip() if gd3 else ''
+        tokens.append(infer_track_context(raw_track))
+
+        # ---- Loop indicator (from VGM header loop_offset field) ----
+        has_loop = getattr(vgm.header, 'loop_offset', 0) != 0
+        tokens.append(LOOP_PRESENT if has_loop else LOOP_ABSENT)
 
         # ---- Channel header: CH_tok, ROLE_tok, [40 patch tokens for FM] ----
         active_channels = sorted(analysis.channel_roles.keys())
@@ -518,9 +730,17 @@ class TokenizerV6:
         if not note_events:
             return []
 
-        bpm          = analysis.tempo_bpm
-        bar_samples  = SAMPLE_RATE * 60.0 / bpm * self.beats_per_bar
-        beat_samples = bar_samples / self.subdivisions
+        bpm       = analysis.tempo_bpm
+        meter_num = analysis.meter_numerator
+        meter_den = analysis.meter_denominator
+
+        # Each grid slot = one 16th note regardless of meter, so BAR/BEAT
+        # tokens are always musically meaningful subdivisions.
+        # Slots per bar: beats × 4 (for /4 time) or beats × 2 (for /8 time).
+        sixteenth     = SAMPLE_RATE * 60.0 / bpm / 4.0
+        slots_per_bar = meter_num * (4 if meter_den == 4 else 2)
+        bar_samples   = sixteenth * slots_per_bar
+        beat_samples  = sixteenth  # one slot = one 16th note
 
         events_by_time: list[tuple[int, str, NoteEvent]] = []
         for e in note_events:
@@ -600,6 +820,9 @@ class TokenizerV6:
             "is_minor": False,
             "meter": (4, 4),
             "composer_token": UNK_COMPOSER,
+            "game_token": UNK_GAME,
+            "context_token": CTX_LEVEL,
+            "loop_present": False,
             "channel_roles": {},
             "channel_patches_direct": {},   # ch → Ym2612Patch (lossless)
         }
@@ -628,6 +851,22 @@ class TokenizerV6:
         # Composer
         if pos < len(all_tokens) and COMPOSER_BASE <= all_tokens[pos] <= UNK_COMPOSER:
             header["composer_token"] = all_tokens[pos]
+            pos += 1
+
+        # Game
+        if pos < len(all_tokens) and GAME_BASE <= all_tokens[pos] <= UNK_GAME:
+            header["game_token"] = all_tokens[pos]
+            pos += 1
+
+        # Track context
+        _ctx_toks = (CTX_LEVEL, CTX_BOSS, CTX_TITLE, CTX_CREDITS, CTX_GAMEOVER, CTX_UNKNOWN)
+        if pos < len(all_tokens) and all_tokens[pos] in _ctx_toks:
+            header["context_token"] = all_tokens[pos]
+            pos += 1
+
+        # Loop indicator
+        if pos < len(all_tokens) and all_tokens[pos] in (LOOP_PRESENT, LOOP_ABSENT):
+            header["loop_present"] = (all_tokens[pos] == LOOP_PRESENT)
             pos += 1
 
         # Channel header entries: CH_tok, ROLE_tok, [40 patch tokens if FM]
@@ -670,9 +909,12 @@ class TokenizerV6:
         if tempo_bpm is not None:
             header["tempo_bpm"] = tempo_bpm
 
-        bpm          = header["tempo_bpm"]
-        bar_samples  = int(SAMPLE_RATE * 60.0 / bpm * self.beats_per_bar)
-        beat_samples = bar_samples // self.subdivisions
+        bpm = header["tempo_bpm"]
+        meter_num, meter_den = header["meter"]
+        sixteenth     = SAMPLE_RATE * 60.0 / bpm / 4.0
+        slots_per_bar = meter_num * (4 if meter_den == 4 else 2)
+        bar_samples   = int(sixteenth * slots_per_bar)
+        beat_samples  = max(1, int(sixteenth))  # one slot = one 16th note
 
         note_events: list[NoteEvent] = []
         open_notes: dict[int, NoteEvent] = {}

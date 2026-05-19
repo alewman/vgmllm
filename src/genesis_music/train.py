@@ -26,6 +26,7 @@ from torch.utils.tensorboard import SummaryWriter
 from .model import VgmGPT, ModelConfig
 from .dataset import load_datasets
 from .dataset_v4 import load_datasets_v4
+from .dataset_v6 import load_datasets_v6
 
 log = logging.getLogger(__name__)
 
@@ -51,12 +52,12 @@ class TrainConfig:
     model_size: str = "medium"         # small, medium, large
 
     # Tokenizer / vocabulary
-    tokenizer: str = "v3"    # "v3" (legacy) or "v4"
+    tokenizer: str = "v6"    # "v3" (legacy), "v4", or "v6"
 
     # Logging & checkpoints
     log_interval: int = 10
-    val_interval: int = 500
-    save_interval: int = 500
+    val_interval: int = 250
+    save_interval: int = 1000
     output_dir: str = "runs/default"
 
     # Hardware
@@ -143,7 +144,13 @@ def train(config: TrainConfig):
         log.info("Using float16 mixed precision")
 
     # Load data
-    if config.tokenizer == "v4":
+    if config.tokenizer == "v6":
+        train_loader, val_loader, _pack_loader, meta = load_datasets_v6(
+            data_dir=config.data_dir,
+            seq_len=config.seq_len,
+            batch_size=config.batch_size,
+        )
+    elif config.tokenizer == "v4":
         train_loader, val_loader, meta = load_datasets_v4(
             data_dir=config.data_dir,
             seq_len=config.seq_len,
@@ -419,19 +426,19 @@ def main():
     parser.add_argument("--output-dir", default="runs/default")
     parser.add_argument("--model-size", choices=["small", "medium", "large"],
                         default="medium")
-    parser.add_argument("--seq-len", type=int, default=4096)
+    parser.add_argument("--seq-len", type=int, default=16384)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--grad-accum", type=int, default=8)
     parser.add_argument("--max-steps", type=int, default=50000)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--warmup", type=int, default=2000)
-    parser.add_argument("--val-interval", type=int, default=500)
-    parser.add_argument("--save-interval", type=int, default=2000)
+    parser.add_argument("--val-interval", type=int, default=250)
+    parser.add_argument("--save-interval", type=int, default=1000)
     parser.add_argument("--compile", action="store_true",
                         help="Enable torch.compile (not supported on Windows)")
     parser.add_argument("--gradient-checkpointing", action="store_true",
                         help="Enable gradient checkpointing to reduce VRAM")
-    parser.add_argument("--tokenizer", choices=["v3", "v4"], default="v3",
+    parser.add_argument("--tokenizer", choices=["v3", "v4", "v6"], default="v6",
                         help="Which tokenizer/vocab the data was prepared with")
     parser.add_argument("--z-loss", type=float, default=0.0,
                         help="PaLM z-loss weight (e.g. 1e-4); 0 = off")

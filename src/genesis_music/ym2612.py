@@ -513,7 +513,18 @@ class Ym2612State:
                 self.ch3_mode = (val >> 6) & 0x03
                 return
             if reg == 0x2B:
-                self.dac_enabled = bool(val & 0x80)
+                new_dac_en = bool(val & 0x80)
+                if new_dac_en and not self.dac_enabled:
+                    # DAC just enabled: FM6 output is replaced by DAC.
+                    # Close any open FM6 note so it is not left unclosed.
+                    ch5 = self.channels[CH_FM_5]
+                    if ch5.open_note is not None:
+                        note = ch5.open_note
+                        note.sample_off = self._current_sample
+                        ch5.open_note = None
+                        ch5.key_on = False
+                        yield note
+                self.dac_enabled = new_dac_en
                 return
             if reg == 0x28:
                 yield from self._handle_key_on_off(val)
@@ -637,6 +648,11 @@ class Ym2612State:
         if ch_bits == 3 or ch_bits == 7:
             return
         ch = ch_bits if ch_bits < 3 else ch_bits - 1  # 4→3, 5→4, 6→5
+
+        # FM6 (channel index 5 = CH_FM_5) is muted when DAC is enabled.
+        # Key-on events produce no audio while dac_enabled is True.
+        if key_on and ch == CH_FM_5 and self.dac_enabled:
+            return
 
         ch_state = self.channels[ch]
 

@@ -18,6 +18,9 @@ from .tokenizer_v2 import VocabV2, decode_ids_v2, encode_vgm_v2
 from .tokenizer_v2 import BOS as BOS_V2, EOS as EOS_V2
 from .tokenizer_v4 import PatchLibrary, TokenizerV4
 from .tokenizer_v4 import BOS as BOS_V4, EOS as EOS_V4
+from .tokenizer_v6 import TokenizerV6, GameMap
+from .tokenizer_v6 import BOS as BOS_V6, EOS as EOS_V6
+from .tokenizer_v6 import GAME_BASE, UNK_GAME, NUM_GAMES
 from .vgm_parser import load_vgm
 from .vgm_synth import synthesise_vgm
 from .vgm_writer import save_vgm
@@ -295,6 +298,95 @@ def generate_vgm_v4(
     return None
 
 
+def generate_vgm_v6(
+    model: VgmGPT,
+    tokenizer: TokenizerV6,
+    device: torch.device,
+    max_tokens: int = 8192,
+    temperature: float = 0.9,
+    top_k: int = 50,
+    top_p: float = 0.95,
+    output_path: Path | str | None = None,
+    prompt_tokens: list[int] | None = None,
+    repetition_penalty: float = 1.0,
+    repetition_window: int = 64,
+) -> Path | None:
+    """Generate a VGM file using the v6 tokenizer."""
+    if prompt_tokens is None:
+        prompt_tokens = [BOS_V6]
+    prompt = torch.tensor([prompt_tokens], dtype=torch.long, device=device)
+
+    log.info(
+        "Generating v6 (max_tokens=%d, temp=%.2f, top_k=%d, top_p=%.2f, "
+        "rep_pen=%.2f, prompt_len=%d)...",
+        max_tokens, temperature, top_k, top_p, repetition_penalty,
+        len(prompt_tokens),
+    )
+
+    tokens = model.generate(
+        prompt,
+        max_new_tokens=max_tokens,
+        temperature=temperature,
+        top_k=top_k,
+        top_p=top_p,
+        eos_token=EOS_V6,
+        repetition_penalty=repetition_penalty,
+        repetition_window=repetition_window,
+    )
+
+    token_list = tokens[0].tolist()
+    log.info("Generated %d tokens", len(token_list))
+
+    # Decode v6 tokens → NoteEvents + header (contains channel_patches_direct)
+    note_events, header = tokenizer.decode(token_list)
+    patch_map = header.get("channel_patches_direct", {})
+    log.info("Decoded to %d NoteEvents", len(note_events))
+
+    # Strip prompt region from output so saved VGM is model-generated only
+    prompt_is_real = len(prompt_tokens) > 1
+    if prompt_is_real:
+        prompt_note_events, _ = tokenizer.decode(prompt_tokens)
+        if prompt_note_events:
+            prompt_end_sample = max(
+                (e.sample_off if e.sample_off >= 0 else e.sample_on)
+                for e in prompt_note_events
+            )
+        else:
+            prompt_end_sample = 0
+        if prompt_end_sample > 0:
+            note_events = [e for e in note_events if e.sample_on >= prompt_end_sample]
+            for e in note_events:
+                e.sample_on -= prompt_end_sample
+                if e.sample_off >= 0:
+                    e.sample_off -= prompt_end_sample
+            log.info(
+                "Stripped prompt region (%.1fs); %d NoteEvents remain",
+                prompt_end_sample / 44100.0, len(note_events),
+            )
+
+    if note_events:
+        total_samples = max(
+            (e.sample_off if e.sample_off >= 0 else e.sample_on)
+            for e in note_events
+        )
+        total_samples = max(total_samples + 44100, 44100)
+    else:
+        total_samples = 44100 * 10
+
+    duration = total_samples / 44100.0
+    log.info("Duration: %.1f seconds", duration)
+
+    if output_path is not None:
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        vgm_bytes = synthesise_vgm(note_events, total_samples, patch_map)
+        output_path.write_bytes(vgm_bytes)
+        log.info("Saved: %s (%.1f KB)", output_path, len(vgm_bytes) / 1024)
+        return output_path
+
+    return None
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -325,8 +417,8 @@ def main():
                         help="Recent token window for repetition penalty")
     parser.add_argument("--n", type=int, default=1, help="Number of files to generate")
     parser.add_argument("--device", default="cuda")
-    parser.add_argument("--vocab-version", choices=["v1", "v2", "v4"], default="v1",
-                        help="Tokenizer version (v1=raw registers, v2=note-level, v4=new)")
+    parser.add_argument("--vocab-version", choices=["v1", "v2", "v4", "v6"], default="v1",
+                        help="Tokenizer version (v1=raw registers, v2=note-level, v4=new, v6=lossless-FM)")
     parser.add_argument("--patch-lib", type=Path, default=Path("data/patch_library_v4.json"),
                         help="Patch library for v4 tokenizer")
     parser.add_argument("--dac-slot-map", type=Path, default=None,
@@ -342,6 +434,10 @@ def main():
     parser.add_argument("--composer-map", type=Path,
                         default=Path("data/prepared_v4/composer_map_v4.json"),
                         help="Path to composer_map_v4.json")
+    parser.add_argument("--game-map", type=Path, default=None,
+                        help="Path to game_map_v6.json for v6 game conditioning")
+    parser.add_argument("--game", type=str, default=None,
+                        help="Game name to condition on for v6 (e.g. 'sonic the hedgehog 3')")
 
     args = parser.parse_args()
 
@@ -354,6 +450,7 @@ def main():
 
     is_v4 = args.vocab_version == "v4"
     is_v2 = args.vocab_version == "v2"
+    is_v6 = args.vocab_version == "v6"
 
     if is_v4:
         patch_lib = PatchLibrary.load(args.patch_lib)
@@ -381,6 +478,19 @@ def main():
             log.info("Loaded drum kit: %d slots", len(drum_kit))
     elif is_v2:
         vocab = VocabV2.load(args.vocab)
+    elif is_v6:
+        gmap_path = args.game_map or Path("data/prepared_v6/game_map_v6.json")
+        game_map_v6 = None
+        if Path(gmap_path).exists():
+            gmap_data = json.loads(Path(gmap_path).read_text())
+            game_map_v6 = GameMap(gmap_data.get("games", []))
+            log.info("Loaded game map: %d games", len(game_map_v6.games))
+        dac_slot_map_path_v6 = args.dac_slot_map or Path("data/prepared_v6/dac_slot_map_v6.json")
+        dac_slot_map_v6: dict[int, int] = {}
+        if Path(dac_slot_map_path_v6).exists():
+            raw_v6 = json.loads(Path(dac_slot_map_path_v6).read_text())
+            dac_slot_map_v6 = {int(k): int(v) for k, v in raw_v6.items()}
+        tokenizer_v6 = TokenizerV6(game_map=game_map_v6, dac_slot_map=dac_slot_map_v6)
     else:
         vocab = Vocab.load(args.vocab)
 
@@ -407,7 +517,9 @@ def main():
     prompt_ids = None
     if args.prompt_vgm is not None:
         vgm = load_vgm(args.prompt_vgm)
-        if is_v4:
+        if is_v6:
+            all_ids = tokenizer_v6.encode(vgm) or [BOS_V6]
+        elif is_v4:
             all_ids = tokenizer_v4.encode(vgm) or [BOS_V4]
         elif is_v2:
             all_ids = encode_vgm_v2(vgm, vocab)
@@ -419,6 +531,16 @@ def main():
             "Prompt: %s → %d tokens (of %d total)",
             args.prompt_vgm.name, len(prompt_ids), len(all_ids),
         )
+
+    # For v6: if --game specified and no VGM prompt (or override game token in prompt)
+    if is_v6 and args.game is not None and game_map_v6 is not None:
+        game_tok = game_map_v6.lookup(args.game)
+        if game_tok == UNK_GAME:
+            log.warning("Game '%s' not found in map, using UNK_GAME", args.game)
+        else:
+            log.info("Game conditioning: '%s' → token %d", args.game, game_tok)
+        if prompt_ids is None:
+            prompt_ids = [BOS_V6, game_tok]
 
     # If no VGM prompt but composer prefix was built, use it
     if prompt_ids is None and composer_prefix:
@@ -435,7 +557,16 @@ def main():
         else:
             out = args.output
 
-        if is_v4:
+        if is_v6:
+            generate_vgm_v6(
+                model=model, tokenizer=tokenizer_v6, device=device,
+                max_tokens=args.max_tokens, temperature=args.temperature,
+                top_k=args.top_k, top_p=args.top_p,
+                repetition_penalty=args.repetition_penalty,
+                repetition_window=args.repetition_window,
+                output_path=out, prompt_tokens=prompt_ids,
+            )
+        elif is_v4:
             generate_vgm_v4(
                 model=model, tokenizer=tokenizer_v4, device=device,
                 max_tokens=args.max_tokens, temperature=args.temperature,

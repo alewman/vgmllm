@@ -516,7 +516,7 @@ def config_small(vocab_size: int = 4096, seq_len: int = 4096) -> ModelConfig:
 
 
 def config_medium(vocab_size: int = 4096, seq_len: int = 8192) -> ModelConfig:
-    """Medium model (~55M params) — good balance for RTX 3090."""
+    """Medium model (~114M params) — good balance for RTX 3090."""
     return ModelConfig(
         vocab_size=vocab_size, seq_len=seq_len,
         n_layers=16, n_heads=12, d_model=768, dropout=0.0,

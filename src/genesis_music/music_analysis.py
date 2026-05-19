@@ -145,6 +145,69 @@ def quantize_tempo(bpm: float) -> tuple[float, int]:
 
 
 # ---------------------------------------------------------------------------
+# Meter / time-signature detection
+# ---------------------------------------------------------------------------
+
+def detect_meter(
+    note_events: list[NoteEvent],
+    total_samples: int,
+    beat_period_samples: float,
+) -> tuple[int, int]:
+    """Estimate the time signature by testing bar-length onset periodicity.
+
+    Computes the autocorrelation of the note-onset histogram and compares the
+    response strength at 2-, 3-, and 4-beat bar lengths.
+
+    Returns (numerator, denominator), e.g. (4, 4), (3, 4), (2, 4).
+    Defaults to (4, 4) when detection is unreliable (too few events, flat ACF,
+    or zero beat period).
+    """
+    onsets = sorted(
+        e.sample_on for e in note_events
+        if e.channel < CH_DAC and e.sample_on >= 0
+    )
+    if len(onsets) < 12 or beat_period_samples <= 0:
+        return 4, 4
+
+    bin_size = 441  # ~10 ms per bin (same resolution as detect_tempo)
+    duration_bins = max(1, total_samples // bin_size + 1)
+    onset_hist = np.zeros(duration_bins, dtype=np.float32)
+    for s in onsets:
+        idx = min(s // bin_size, duration_bins - 1)
+        onset_hist[idx] += 1.0
+
+    acf = np.correlate(onset_hist, onset_hist, mode="full")
+    acf = acf[len(acf) // 2:]  # keep non-negative lags
+
+    def _strength(lag_samples: float) -> float:
+        lag_bins = max(0, min(int(round(lag_samples / bin_size)), len(acf) - 1))
+        return float(acf[lag_bins])
+
+    s2 = _strength(beat_period_samples * 2)
+    s3 = _strength(beat_period_samples * 3)
+    s4 = _strength(beat_period_samples * 4)
+
+    # Confidence gate: only accept non-4/4 when the winner's ACF peak is
+    # clearly stronger than all alternatives (ratio ≥ 1.5×).  Game music is
+    # ~95% 4/4, so we bias heavily toward 4/4 to avoid mislabelling and
+    # corrupting the beat grid.
+    best_score, best_n = max((s2, 2), (s3, 3), (s4, 4), key=lambda x: x[0])
+    others = [s for s, n in [(s2, 2), (s3, 3), (s4, 4)] if n != best_n]
+    second_best = max(others) if others else 0.0
+
+    confidence_ok = second_best == 0.0 or (best_score / second_best) >= 1.5
+
+    if not confidence_ok or best_n == 4:
+        return 4, 4
+
+    # 2/4 is easily confused with 4/4 (first half of bar); apply extra guard.
+    if best_n == 2 and s4 > 0.7 * s2:
+        return 4, 4
+
+    return best_n, 4
+
+
+# ---------------------------------------------------------------------------
 # Key / mode detection
 # ---------------------------------------------------------------------------
 
@@ -340,15 +403,20 @@ def analyse_vgm(
 
     key_idx, is_minor, key_name = detect_key(note_events)
 
+    beat_period = SAMPLE_RATE * 60.0 / bpm
+    meter_num, meter_den = detect_meter(note_events, total_samples, beat_period)
+
     # Detect DAC-enabled channels from NoteEvent list
     dac_channels = {e.channel for e in note_events if e.channel == CH_DAC}
     roles = classify_channel_roles(note_events, dac_channels)
 
     return MusicAnalysis(
-        tempo_bpm       = bpm,
-        tempo_token_idx = tempo_idx,
-        key_index       = key_idx,
-        is_minor        = is_minor,
-        key_name        = key_name,
-        channel_roles   = roles,
+        tempo_bpm         = bpm,
+        tempo_token_idx   = tempo_idx,
+        key_index         = key_idx,
+        is_minor          = is_minor,
+        key_name          = key_name,
+        meter_numerator   = meter_num,
+        meter_denominator = meter_den,
+        channel_roles     = roles,
     )
