@@ -740,7 +740,8 @@ def _probe_amf(ffmpeg_bin: str) -> bool:
     try:
         r = subprocess.run(
             [ffmpeg_bin, "-hide_banner", "-loglevel", "error",
-             "-f", "lavfi", "-i", "nullsrc=s=64x64:d=0.04",
+             "-f", "lavfi", "-i", "color=black:s=128x128:r=30:d=0.1",
+             "-vf", "format=yuv420p",
              "-frames:v", "1", "-c:v", "h264_amf", "-f", "null", "-"],
             capture_output=True, timeout=10,
         )
