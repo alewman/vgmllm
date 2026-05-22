@@ -96,3 +96,82 @@ The hardest problem — separates "sounds nice for 10 seconds" from "this is a s
 - Repetition penalty rp=1.2/w64 is the sweet spot
 - Dense music (TFIV: 0.5ms/tok) vs sparse (Sonic: 3.3ms/tok) affects token budget significantly
 - Quality degrades beyond training context length (4096 tokens)
+
+---
+
+## v6 — Current Run (as of May 2026)
+
+**Model**: 16 layers, 12 heads, d=768, 113.8M params, bfloat16, seq_len=16384  
+**Run**: `v6_medium` — 50,000 steps, batch=16 (4×4 grad accum), lr=3e-4  
+**Hardware**: RTX 3090, 25.8GB VRAM, WSL, ~13s/step  
+**Tokenizer**: v6 — 794 tokens, lossless FM patch encoding (40 params per FM channel in header), 64 conditioned games (GAME_BASE 660–723)
+
+**Val loss progression**: 250→2.07, 500→1.43, 1000→1.04, 2000→0.62, 4000→0.40, 6000→0.31, 7500→0.299, 7750→0.291 (ppl≈1.3)  
+**Training loss at step ~11k**: ~0.11–0.13, grad_norm ~0.09–0.10 (very stable)  
+**ETA to 50k**: ~6 more days from step 11k
+
+### Key v6 Findings (step 11k — early, still training)
+- **Best model yet by a wide margin** — already surpasses previous runs at 45k steps
+- Confidently uses up to 7 instruments simultaneously (FM×6 + PSG/DAC)
+- Instruments sound authentic — proper FM timbres carrying through
+- Mildly coordinated multi-channel writing — channels are aware of each other
+- Still "crawling" — melodic/harmonic development is slow, structure is not there yet
+- Working through scales rather than assertive melodic statements
+- Game conditioning works: SFII Ken's Stage prompt produces SFII-flavored output
+- Lossless FM patch encoding (v6 key feature) is clearly helping timbral consistency
+
+### Known v6 Limitations (targets for v7)
+1. **Static channel role labeling** — roles (BASS, LEAD, HARM, COUNTER, DRUMS, PERC, UNK) are assigned *once per track* at encode time using whole-track mean pitch + note density. If a channel modulates from bass to lead mid-song, it gets a single stale ROLE token for the entire sequence. The model cannot represent or learn instrument role changes.
+2. **Konami sound driver underrepresentation** — the 64 conditioned games are simply the top 64 by raw track count in the VGM corpus. Konami custom driver games (Castlevania: Bloodlines, Contra: Hard Corps, Rocket Knight Adventures, Sparkster, TMNT: Hyperstone Heist) are *in* the corpus but contributed only ~20–30 tracks each — far below the RPG-heavy titles dominating the top 64. Only Animaniacs (a licensed game) represents Konami in the conditioned set. This means the model has seen Konami-driver VGMs but can't be conditioned on them; they dilute the UNK_GAME bucket.
+3. **No dynamic structure** — same as previous versions: no verse/chorus/bridge awareness, no long-range repetition with variation. Song form is not modeled.
+4. **Roles computed from notes, not register writes** — DAC sample instrument changes mid-track are invisible to the role classifier since it operates on decoded NoteEvents, not raw register state.
+
+---
+
+## v7 — Planned Improvements
+
+### Priority 1: Dynamic Channel Role Conditioning
+Instead of a single ROLE token per channel in the track header, emit ROLE re-labeling tokens at segment boundaries (e.g., every N bars or at detected instrument change events). This allows the model to learn that a channel's musical function can shift mid-track, which is extremely common in Genesis music (bass doubles as a pad, lead trades with counter-melody, etc.).
+
+Implementation options:
+- **Segment-level ROLE tokens**: divide track into fixed segments (e.g., 4-bar chunks), re-emit `CH_n ROLE_x` at each segment boundary — simple, backward-compatible with v6 tokenizer structure
+- **Change-detect ROLE tokens**: only emit a new ROLE token when `classify_channel_roles()` over a sliding window disagrees with the current label — more compact but requires windowed analysis in the encoder
+- Either approach requires updating `tokenizer_v6.py` encode() and decode() and retraining from scratch
+
+### Priority 2: Driver-Aware Corpus Curation
+Replace raw track-count ranking with **stratified sampling by sound driver family**. Major Genesis driver families to ensure representation:
+- **SMPS** (Sonic/Sega in-house) — already dominant in corpus
+- **Konami custom** — Castlevania: Bloodlines, Contra: Hard Corps, Rocket Knight Adventures, Sparkster, TMNT: Hyperstone Heist
+- **GEMS** (Electronic Arts) — NBA Live, FIFA series, many EA Sports titles
+- **Squaresoft custom** — Final Fantasy ports if any exist
+- **Capcom custom** — Street Fighter II variants (already represented), Mega Man: Wily Wars
+- **Other in-house** — Treasure (Gunstar Heroes, Dynamite Headdy already in set), Technosoft (TFIV already in set)
+
+Target: ~8–12 driver families × ~8 representative games each = ~64–96 conditioned games, balanced by driver rather than raw count.
+
+### Priority 3: Structural Tokens / Song Form
+Add explicit section boundary tokens (INTRO, VERSE, CHORUS, BRIDGE, OUTRO) either:
+- Detected via self-similarity analysis (repeated phrase detection) at encode time
+- Or as a learned planning stage (two-pass: first generate section plan, then generate notes conditioned on plan)
+
+This is the hardest problem and may require a larger model (≥300M params) and longer sequences.
+
+### Lower Priority
+- **Evaluation metrics**: FAD, pitch class entropy, structural self-similarity matrix, automated harmonic analysis — move beyond manual listening
+- **Key-aware constrained decoding**: mask logits to only permit in-key pitches at inference; softened version via logit bias rather than hard mask
+- **Tempo/groove conditioning**: separate groove templates (swing, straight, shuffle) as explicit conditioning tokens beyond just BPM
+
+---
+
+## Updated Progress Summary (May 2026)
+
+| Stage | Description | Status |
+|-------|-------------|--------|
+| 1 | Representation Design | **v6: lossless FM encoding, 7 channel roles, game/composer conditioning** |
+| 2 | Data Pipeline & Corpus | v6: 64 conditioned games (track-count ranked). **v7 target: driver-stratified** |
+| 3 | Architecture | v6: 113.8M GPT, seq_len=16384. Sufficient for current quality level |
+| 4 | Training Regime | v6: 50K steps, stable loss ~0.11 at step 11k. No curriculum yet |
+| 5 | Conditioning | v6: game, composer, key, tempo, meter, channel roles in header |
+| 6 | Long-Range Coherence | **Not addressed.** v7 target: structural tokens |
+| 7 | Evaluation | Manual listening only |
+| 8 | Inference Constraints | Basic sampling (temp, top-k, top-p, rep-pen). No music-aware constraints |

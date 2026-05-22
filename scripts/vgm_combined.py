@@ -99,7 +99,7 @@ from vgm_synthesia import (              # noqa: E402
 
 # ── layout constants ───────────────────────────────────────────────────────────
 HEADER_H   = 36     # px — top title + timestamp bar
-OSC_COLS   = 4      # oscilloscope boxes per row
+OSC_COLS   = 4      # oscilloscope boxes per row (≤6 channels → 3, else 4)
 OSC_BOX_H  = 110    # px — height of each oscilloscope box
 OSC_MARGIN = 8      # px — gap between boxes / screen edges
 OSC_PAD    = 4      # px — inner padding inside box
@@ -641,6 +641,8 @@ def _interactive(
         print(f"Loop point: {t_loop_start:.2f}s (loop body {total_sec - t_loop_start:.2f}s)")
     print("Controls: SPACE=pause  LEFT/RIGHT=seek 5s  Q/ESC=quit")
 
+    _last_frame_time = _time.perf_counter()
+
     while True:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -650,6 +652,7 @@ def _interactive(
                     pygame.quit(); return
                 elif event.key == pygame.K_SPACE:
                     paused = not paused
+                    _last_frame_time = _time.perf_counter()   # avoid dt spike on unpause
                     if has_audio:
                         if paused:
                             pygame.mixer.music.pause()
@@ -659,10 +662,16 @@ def _interactive(
                     t = min(t + 5.0, t_end)
                     _start_audio_at(max(t, 0))
                     audio_started = t >= 0
+                    _last_frame_time = _time.perf_counter()
                 elif event.key == pygame.K_LEFT:
                     t = max(t - 5.0, -args.lookahead)
                     _start_audio_at(max(t, 0))
                     audio_started = t >= 0
+                    _last_frame_time = _time.perf_counter()
+
+        now = _time.perf_counter()
+        raw_dt = now - _last_frame_time
+        _last_frame_time = now
 
         if not paused:
             if has_audio and audio_started:
@@ -670,18 +679,14 @@ def _interactive(
                 if pos_ms >= 0:
                     t = pos_ms / 1000.0
                 else:
-                    # audio finished — advance by clock so loop condition triggers
-                    dt = clock.tick(args.fps) / 1000.0
-                    t += dt
+                    # audio finished — advance by wall-clock so loop condition triggers
+                    t += raw_dt
             else:
-                dt = clock.tick(args.fps) / 1000.0
-                t += dt
+                t += raw_dt
                 if has_audio and not audio_started and t >= 0:
                     pygame.mixer.music.play(start=0)
                     audio_started = True
                     t = 0.0
-        else:
-            clock.tick(30)
 
         if t >= t_end:
             # Seamless loop: jump to the VGM loop point (not back to pre-roll)
@@ -698,14 +703,13 @@ def _interactive(
             dac_strip_w, pitch_min, pitch_max, white_w, black_w, min_white, piano_x0,
             channels, pos_sample, sample_rate, vgm_pos,
             dac_is_active, ch3_special_is_active,
-            window_s, autoscale, OSC_COLS, title, len(channels), total_sec, composer,
+            window_s, autoscale, (3 if len(channels) <= 6 else 4), title, len(channels), total_sec, composer,
             font_hdr, font_mono, font_sm, font_key,
             no_osc=args.no_osc,
         )
 
         pygame.display.flip()
-        if not (has_audio and audio_started and not paused):
-            clock.tick(args.fps)
+        clock.tick(args.fps)
 
 
 # ── MP4 export mode ────────────────────────────────────────────────────────────
@@ -781,7 +785,7 @@ def _export_mp4(
                 dac_strip_w, pitch_min, pitch_max, white_w, black_w, min_white, piano_x0,
                 channels, pos_sample, sample_rate, vgm_pos,
                 dac_is_active, ch3_special_is_active,
-                window_s, autoscale, OSC_COLS, title, len(channels), total_sec, composer,
+                window_s, autoscale, (3 if len(channels) <= 6 else 4), title, len(channels), total_sec, composer,
                 font_hdr, font_mono, font_sm, font_key,
                 no_osc=args.no_osc,
             )
