@@ -646,7 +646,7 @@ def _interactive(
     autoscale = not args.no_autoscale
     title     = track_title
 
-    t         = -args.lookahead
+    t         = -args.lookahead / 2   # start with notes already halfway down
     t_end     = total_sec + 1.0
     paused    = False
 
@@ -752,9 +752,9 @@ def _export_mp4(
 
     surface      = pygame.Surface((args.width, args.height))
     spf          = 1.0 / args.fps
-    # Render intro + full first loop + one extra loop pass + tail
+    # Render intro (half-lookahead pre-roll) + full first loop + one extra loop pass + tail
     loop_dur     = (total_sec - t_loop_start) if t_loop_start > 0.0 else 0.0
-    total_frames = int((total_sec + loop_dur + args.lookahead) * args.fps)
+    total_frames = int((total_sec + loop_dur + args.lookahead / 2) * args.fps)
     window_s     = args.window
     autoscale    = not args.no_autoscale
     title        = track_title
@@ -777,8 +777,8 @@ def _export_mp4(
         "-i",      "pipe:0",
     ]
     if has_mix:
-        # Delay audio by lookahead so it starts when notes reach the piano
-        ffmpeg_cmd += ["-itsoffset", f"{args.lookahead:.6f}", "-i", str(audio_wav)]
+        # Delay audio by half-lookahead so it starts when notes reach the piano
+        ffmpeg_cmd += ["-itsoffset", f"{args.lookahead / 2:.6f}", "-i", str(audio_wav)]
     ffmpeg_cmd += [
         "-vcodec",  "libx264",
         "-pix_fmt", "yuv420p",
@@ -796,7 +796,7 @@ def _export_mp4(
 
     try:
         for frame_i in range(total_frames):
-            t          = -args.lookahead + frame_i * spf
+            t          = -args.lookahead / 2 + frame_i * spf
             pos_sample = int(max(t, 0.0) * sample_rate)
             vgm_pos    = int(pos_sample * VGM_RATE / sample_rate)
 
