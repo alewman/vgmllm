@@ -733,6 +733,45 @@ def _interactive(
             clock.tick(args.fps)
 
 
+# ── MP4 encoder helpers ──────────────────────────────────────────────────────────────────────────────
+
+def _probe_amf(ffmpeg_bin: str) -> bool:
+    """Return True if the h264_amf encoder is usable on this system."""
+    try:
+        r = subprocess.run(
+            [ffmpeg_bin, "-hide_banner", "-loglevel", "error",
+             "-f", "lavfi", "-i", "nullsrc=s=64x64:d=0.04",
+             "-frames:v", "1", "-c:v", "h264_amf", "-f", "null", "-"],
+            capture_output=True, timeout=10,
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def _video_enc_args(args, ffmpeg_bin: str) -> list[str]:
+    """Return the ffmpeg video encoder arguments based on --amf flag."""
+    if getattr(args, 'amf', False):
+        print("  Probing h264_amf (AMD APU hardware encoder) …", end=" ", flush=True)
+        if _probe_amf(ffmpeg_bin):
+            print("available ✓  (encoding on Radeon APU)")
+            return [
+                "-vcodec",  "h264_amf",
+                "-pix_fmt", "yuv420p",
+                "-quality", "quality",
+                "-rc",      "cqp",
+                "-qp_i",    "18",
+                "-qp_p",    "20",
+            ]
+        print("not available — falling back to libx264")
+    return [
+        "-vcodec",  "libx264",
+        "-pix_fmt", "yuv420p",
+        "-crf",     "18",
+        "-preset",  "fast",
+    ]
+
+
 # ── MP4 export mode ────────────────────────────────────────────────────────────
 
 def _export_mp4(
@@ -779,12 +818,7 @@ def _export_mp4(
     if has_mix:
         # Delay audio by half-lookahead so it starts when notes reach the piano
         ffmpeg_cmd += ["-itsoffset", f"{args.lookahead / 2:.6f}", "-i", str(audio_wav)]
-    ffmpeg_cmd += [
-        "-vcodec",  "libx264",
-        "-pix_fmt", "yuv420p",
-        "-crf",     "18",
-        "-preset",  "fast",
-    ]
+    ffmpeg_cmd += _video_enc_args(args, ffmpeg)
     if has_mix:
         ffmpeg_cmd += ["-acodec", "aac", "-b:a", "192k", "-shortest"]
     ffmpeg_cmd.append(str(out_path))
@@ -855,6 +889,9 @@ def main() -> None:
                         help="Disable per-channel amplitude normalization in oscilloscope")
     parser.add_argument("--no-osc",       action="store_true", dest="no_osc",
                         help="Disable oscilloscope overlay (Synthesia background only)")
+    parser.add_argument("--amf",          action="store_true",
+                        help="Use AMD AMF hardware encoder (h264_amf) on the APU; "
+                             "auto-falls back to libx264 if unavailable")
     parser.add_argument("--vgmplay-dir",  type=Path, default=_DEFAULT_VGMPLAY_DIR,
                         dest="vgmplay_dir",
                         help=f"VGMPlay directory (default: {_DEFAULT_VGMPLAY_DIR})")
