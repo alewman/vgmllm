@@ -104,20 +104,29 @@ OSC_MARGIN = 8      # px — gap between boxes / screen edges
 OSC_PAD    = 4      # px — inner padding inside box
 CHIP_H     = 15     # px — opaque title chip at top of each box
 
-# Box height per column tier: wider grid (fewer cols) → taller boxes
-_BOX_H_FOR_COLS = {2: 160, 3: 130, 4: 110}
-
 APP_NAME   = "VgmLLM"
 
 
 def _osc_cols(n_channels: int) -> int:
-    """Dynamic column count: ≤6 → 2 cols, 7-9 → 3 cols, >9 → 4 cols."""
-    if n_channels <= 6:
+    """Dynamic column count: ≤4 → 2 cols, 5-9 → 3 cols, 10+ → 4 cols."""
+    if n_channels <= 4:
         return 2
     elif n_channels <= 9:
         return 3
     else:
         return 4
+
+
+def _osc_box_h(n_rows: int) -> int:
+    """Box height by row count: fewer rows → taller boxes."""
+    if n_rows <= 1:
+        return 180
+    elif n_rows == 2:
+        return 150
+    elif n_rows == 3:
+        return 130
+    else:
+        return 110
 
 
 # ── colour helpers ─────────────────────────────────────────────────────────────
@@ -444,7 +453,8 @@ def _render_combined(
         grid_x = dac_strip_w + OSC_MARGIN
         grid_y = top_y + OSC_MARGIN
         grid_w = screen_w - grid_x - OSC_MARGIN
-        box_h  = _BOX_H_FOR_COLS.get(cols, OSC_BOX_H)
+        n_rows = math.ceil(len(channels) / cols)
+        box_h  = _osc_box_h(n_rows)
         _draw_osc_grid(
             surface, channels, pos_sample, sample_rate,
             grid_x, grid_y, grid_w, cols,
