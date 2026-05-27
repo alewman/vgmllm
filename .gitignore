@@ -35,6 +35,10 @@ _scan_*.py
 _compare_*.py
 _inspect_*.py
 _analyze_*.py
+_diag_*.py
+_decode_*.py
+_pan_*.py
+_feature_*.py
 check_*.py
 stats_check.py
 keep_awake.py
@@ -46,6 +50,11 @@ OPUS_HANDOFF*.md
 # Data run artifacts
 data/*.txt
 data/*.csv
+data/clusters_v7.json
+
+# Old v6-era one-shot batch generation scripts
+scripts/gen_v6_*batch*
+scripts/launch_gen_26k_batch.py
 
 # Dev survey / throwaway notes at repo root
 survey_results.txt

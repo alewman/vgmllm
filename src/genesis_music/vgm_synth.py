@@ -315,11 +315,14 @@ def _write_psg_volume(stream: _VgmStream, ch_psg: int, volume: int) -> None:
     stream.write_psg(0x80 | (ch_psg << 5) | 0x10 | attenuation)
 
 
-def _write_psg_noise_hit(stream: _VgmStream) -> None:
-    """Emit a short noise burst on PSG noise channel (channel 3)."""
-    # Noise control: 0b1_11_0_ffbb  ff=white/periodic, bb=rate
-    # 0b1_11_0_0111 = white noise, max rate
-    stream.write_psg(0xE7)                      # noise on, white, high rate
+def _write_psg_noise_hit(stream: _VgmStream, noise_mode: int = 0x07) -> None:
+    """Emit a noise burst on PSG noise channel (channel 3).
+
+    Args:
+        noise_mode: 4-bit SN76489 noise control value (bit 2=white/periodic,
+                    bits 1:0=rate). Emitted as 0xE0 | noise_mode.
+    """
+    stream.write_psg(0xE0 | (noise_mode & 0x0F))   # noise control byte
     stream.write_psg(0x80 | (3 << 5) | 0x10 | 0)   # ch3 volume = 0 (loud)
 
 
@@ -421,11 +424,17 @@ def synthesise_vgm(
                     actions.append(_Action(tl_sample, 1, "fm_tl", (ch, tl_snap)))
             # Mid-note FM pitch bend (portamento/glide): (sample, fnum, block)
             # 3-element tuples distinguish FM bends from PSG 2-element waypoints.
+            # Also includes post-key-off pitch slides (release-phase portamento)
+            # captured by the decoder keeping open_note alive after key-off.
             for wp in note.pitch_envelope:
                 if len(wp) == 3:  # FM: (sample, fnum, block)
                     wp_sample, wp_fnum, wp_block = wp
-                    if sample_on < wp_sample < sample_off:
+                    if wp_sample > sample_on:  # any time after note-on, incl. after key-off
                         actions.append(_Action(wp_sample, 1, "fm_bend", (ch, wp_fnum, wp_block)))
+            # Mid-note pan modulation (auto-pan / pan sweep).
+            for pan_sample, pan_lr in note.pan_envelope:
+                if pan_sample > sample_on:
+                    actions.append(_Action(pan_sample, 1, "fm_pan", (ch, pan_lr)))
 
         elif ch == CH_DAC:
             if dac_stream is None:  # only use NoteEvent DAC if no verbatim stream provided
@@ -442,9 +451,15 @@ def synthesise_vgm(
                 # the decoder — use it directly (no MIDI round-trip conversion).
                 if wp_sample > sample_on and wp_sample < sample_off:
                     actions.append(_Action(wp_sample, 1, "psg_bend", (psg_ch, wp_period)))
+            # Emit mid-note volume changes from the volume envelope.
+            # raw_attenuation (0=loudest, 14=quietest audible) is stored and
+            # emitted directly — no conversion through the velocity scale.
+            for wp_sample, raw_atten in note.vol_envelope:
+                if wp_sample > sample_on and wp_sample < sample_off:
+                    actions.append(_Action(wp_sample, 1, "psg_vol", (psg_ch, raw_atten)))
 
         elif ch == CH_PSG_NOISE:
-            actions.append(_Action(sample_on,   1, "noise_on",  ()))
+            actions.append(_Action(sample_on,   1, "noise_on",  (note.noise_mode,)))
             actions.append(_Action(sample_off, -1, "noise_off", ()))
 
     # ---- Build verbatim DAC stream actions (if provided) ----
@@ -549,6 +564,22 @@ def synthesise_vgm(
             from genesis_music.ym2612 import fnumber_to_midi as _f2m
             last_midi[ch] = _f2m(fnum, block)
 
+        elif action.kind == "fm_pan":
+            # Mid-note pan modulation: write 0xB4+offset with new LR pan bits.
+            # AMS/FMS come from the current patch for this channel.
+            ch, pan_lr = action.data
+            port, offset = _port_and_reg_offset(ch)
+            cur_patch = last_patch.get(ch)
+            ams = (cur_patch.ams & 0x03) if cur_patch else 0
+            fms = (cur_patch.fms & 0x07) if cur_patch else 0
+            b4 = ((pan_lr & 0x03) << 6) | (ams << 4) | fms
+            stream.write_ym2612(port, 0xB4 + offset, b4)
+            # Update last_patch pan so fingerprint/diff logic stays consistent
+            if cur_patch is not None:
+                from dataclasses import replace as _dcp
+                last_patch[ch] = _dcp(cur_patch, pan=pan_lr)
+                last_patch_fp[ch] = last_patch[ch].to_fingerprint()
+
         elif action.kind == "dac_mode":
             stream.write_ym2612(0, 0x2B, 0x80 if action.data else 0x00)
 
@@ -586,6 +617,11 @@ def synthesise_vgm(
             stream.write_psg(0x80 | (ch << 5) | low4)
             stream.write_psg(high6)
 
+        elif action.kind == "psg_vol":
+            # Mid-note volume envelope step — emit raw attenuation byte directly
+            psg_ch, raw_atten = action.data
+            stream.write_psg(0x80 | (psg_ch << 5) | 0x10 | (raw_atten & 0x0F))
+
         elif action.kind == "dac_seek":
             stream.write_dac_seek(action.data)
 
@@ -593,7 +629,8 @@ def synthesise_vgm(
             stream.write_dac_byte(action.data)  # 0x8n write + advance n extra samples
 
         elif action.kind == "noise_on":
-            _write_psg_noise_hit(stream)
+            noise_mode, = action.data
+            _write_psg_noise_hit(stream, noise_mode)
 
         elif action.kind == "noise_off":
             _write_psg_noise_off(stream)

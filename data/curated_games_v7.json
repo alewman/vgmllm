@@ -1,0 +1,434 @@
+{
+  "_comment": "Curated 63-game reference set for v7 GameMap token assignment.",
+  "_purpose": "Each game represents a distinct hardware driver + technique archetype. The goal is maximum hardware coverage, not general corpus quality. When building GameMapV7, these 63 names are assigned token IDs in order (1-63). Everything else is UNK_GAME.",
+  "_status": "VERIFIED 2026-05-26 - 63/63 hints verified against corpus GD3 tags via verify_curated_games.py. 10 dashes→colons fixed, 4 corpus-missing games replaced.",
+  "_note_on_duplicates": "Comix Zone appears twice (SMPS-Derived and GEMS) intentionally - different driver builds of the same game. Gauntlet IV appears twice (Follin and Sakimoto) for the same reason.",
+
+  "driver_groups": [
+
+    {
+      "driver_id": 1,
+      "driver_name": "SMPS Z80 (Sega of Japan Standard)",
+      "driver_token": "DRIVER_SMPS_Z80",
+      "notes": "Masterclass in clean FM leads, standard DAC sample handling, peak Z80 performance",
+      "games": [
+        {
+          "name": "Sonic The Hedgehog",
+          "gd3_name_hint": "Sonic the Hedgehog",
+          "notes": "Masterclass in clean FM leads and standard DAC sample handling"
+        },
+        {
+          "name": "Sonic The Hedgehog 2",
+          "gd3_name_hint": "Sonic the Hedgehog 2",
+          "notes": "Advanced percussion layout and early multi-channel panning implementation"
+        },
+        {
+          "name": "Sonic & Knuckles",
+          "gd3_name_hint": "Sonic & Knuckles",
+          "notes": "Peak Z80 performance with dual-channel sample optimizations"
+        },
+        {
+          "name": "Streets of Rage",
+          "gd3_name_hint": "Streets of Rage",
+          "notes": "Yuzo Koshiro's classic, heavy house music utilizing customized FM sidebands"
+        },
+        {
+          "name": "Streets of Rage 2",
+          "gd3_name_hint": "Streets of Rage 2",
+          "notes": "Gold standard for Mega Drive club bass emulation"
+        },
+        {
+          "name": "Streets of Rage 3",
+          "gd3_name_hint": "Streets of Rage 3",
+          "notes": "Experimental algorithmic industrial techno pushing FM modulating frequencies to limits"
+        },
+        {
+          "name": "Ristar",
+          "gd3_name_hint": "Ristar",
+          "notes": "High-fidelity melodic instrument patches utilizing intense PSG layering"
+        },
+        {
+          "name": "Shinobi III",
+          "gd3_name_hint": "Shinobi III: Return of the Ninja Master",
+          "notes": "Pristine punchy acoustic instrument synthesis"
+        },
+        {
+          "name": "Beyond Oasis",
+          "gd3_name_hint": "Beyond Oasis",
+          "notes": "Orchestral composition utilizing unique dynamic instrument scaling"
+        },
+        {
+          "name": "Phantasy Star IV",
+          "gd3_name_hint": "Phantasy Star IV",
+          "notes": "Rapid instrument swapping and complex macro tables for cinematic tracks"
+        },
+        {
+          "name": "Golden Axe II",
+          "gd3_name_hint": "Golden Axe II",
+          "notes": "Classic dark fantasy textures featuring specific low-sample-rate DAC grunts"
+        }
+      ]
+    },
+
+    {
+      "driver_id": 2,
+      "driver_name": "SMPS 68k (Early Motorola-Driven variant)",
+      "driver_token": "DRIVER_SMPS_68K",
+      "notes": "Early-gen SMPS, direct SFX/FM channel sharing, Koshiro's initial FM chip handling",
+      "games": [
+        {
+          "name": "The Revenge of Shinobi",
+          "gd3_name_hint": "The Revenge of Shinobi",
+          "notes": "Legendary early-gen soundtrack showcasing Koshiro's initial FM chip handling"
+        },
+        {
+          "name": "Castle of Illusion",
+          "gd3_name_hint": "Castle of Illusion Starring Mickey Mouse",
+          "notes": "Excellent melodic counterpoint using early Sega sound libraries"
+        },
+        {
+          "name": "Golden Axe",
+          "gd3_name_hint": "Golden Axe",
+          "notes": "Raw uncompressed sound effects sharing priorities directly with FM channels"
+        },
+        {
+          "name": "Columns",
+          "gd3_name_hint": "Columns",
+          "notes": "Pure synth-pop patches highlighting early stereo hardware panning"
+        },
+        {
+          "name": "Super Hang-On",
+          "gd3_name_hint": "Super Hang-On",
+          "notes": "High-speed FM channels simulating roaring engine sound designs"
+        }
+      ]
+    },
+
+    {
+      "driver_id": 3,
+      "driver_name": "SMPS-Derived Customs",
+      "driver_token": "DRIVER_SMPS_CUSTOM",
+      "notes": "Heavily modified SMPS engines with unique patches and electronic rhythms",
+      "games": [
+        {
+          "name": "Sonic 3D Blast",
+          "gd3_name_hint": "Sonic 3D Blast",
+          "notes": "Jun Senoue variant - highly customized SMPS for crisp snappy euro-dance patches"
+        },
+        {
+          "name": "Vectorman",
+          "gd3_name_hint": "Vectorman",
+          "notes": "Modified driver executing unique gritty electronic rhythms and digital sound design"
+        },
+        {
+          "name": "Vectorman 2",
+          "gd3_name_hint": "Vectorman 2",
+          "notes": "Darker synth architecture with heavily customized environmental sound effects"
+        },
+        {
+          "name": "Comix Zone (Howard Drossin)",
+          "gd3_name_hint": "Comix Zone",
+          "notes": "Howard Drossin variant - pushed SMPS to limits to mimic crunchy 90s grunge rock guitars",
+          "_duplicate_note": "Same game as GEMS entry below, different driver build"
+        },
+        {
+          "name": "ToeJam & Earl in Panic on Funkotron",
+          "gd3_name_hint": "ToeJam & Earl in Panic on Funkotron",
+          "notes": "Heavily tweaked for thick slapping basslines and specialized funk patches"
+        }
+      ]
+    },
+
+    {
+      "driver_id": 4,
+      "driver_name": "GEMS (Genesis Editor for Music and Sound)",
+      "driver_token": "DRIVER_GEMS",
+      "notes": "Sega of America standard tool. Slightly metallic texture due to standard patch library. Essential for the model to differentiate from custom drivers.",
+      "games": [
+        {
+          "name": "Comix Zone (GEMS Retail)",
+          "gd3_name_hint": "Comix Zone",
+          "notes": "Structural study - compare against custom Drossin variant",
+          "_duplicate_note": "Same game as SMPS Custom entry above, different driver build"
+        },
+        {
+          "name": "Earthworm Jim",
+          "gd3_name_hint": "Earthworm Jim",
+          "notes": "Tommy Tallarico's bluesy rock maximizing GEMS standard patch set"
+        },
+        {
+          "name": "Earthworm Jim 2",
+          "gd3_name_hint": "Earthworm Jim 2",
+          "notes": "Highly dynamic avant-garde classical adaptations using western tracking styles"
+        },
+        {
+          "name": "Sonic Spinball",
+          "gd3_name_hint": "Sonic the Hedgehog Spinball",
+          "notes": "Aggressive distorted FM patches highlighting GEMS limitations and unique crunch"
+        },
+        {
+          "name": "The Ooze",
+          "gd3_name_hint": "The Ooze",
+          "notes": "Slushy heavily modulating industrial sounds from simple waveforms"
+        },
+        {
+          "name": "Aladdin",
+          "gd3_name_hint": "Aladdin",
+          "notes": "Virgin Games - masterful GEMS use with specific sample-streaming hacks"
+        },
+        {
+          "name": "The Jungle Book",
+          "gd3_name_hint": "The Jungle Book",
+          "notes": "Incredible percussion layouts bypassing traditional GEMS playback stutter"
+        },
+        {
+          "name": "Jurassic Park",
+          "gd3_name_hint": "Jurassic Park",
+          "notes": "Atmospheric ambient pads and deep rumbling low-frequency sine waves"
+        },
+        {
+          "name": "Gargoyles",
+          "gd3_name_hint": "Gargoyles",
+          "notes": "Dark orchestral tones utilizing heavy chord groupings across fewer FM channels"
+        },
+        {
+          "name": "X-Men",
+          "gd3_name_hint": "X-Men",
+          "notes": "Heavily driven FM synth-rock leaning into crunchy rhythm sections"
+        }
+      ]
+    },
+
+    {
+      "driver_id": 5,
+      "driver_name": "Technosoft Custom Driver",
+      "driver_token": "DRIVER_TECHNOSOFT",
+      "notes": "Legendary for the 'heavy metal' sound via raw overdriven FM operators",
+      "games": [
+        {
+          "name": "Thunder Force III",
+          "gd3_name_hint": "Thunder Force III",
+          "notes": "Aggressive lightning-fast synth solos via customized square-wave approximations"
+        },
+        {
+          "name": "Thunder Force IV",
+          "gd3_name_hint": "Thunder Force IV",
+          "notes": "Pinnacle of Genesis metal music; legendary overdriven rhythm guitar patches"
+        },
+        {
+          "name": "Elemental Master",
+          "gd3_name_hint": "Elemental Master",
+          "notes": "Fantasy-driven metal melodies showcasing rapid PSG-to-FM channel tracking"
+        },
+        {
+          "name": "Dragon's Fury",
+          "gd3_name_hint": "Dragon's Fury",
+          "notes": "Western title of Devil Crash MD - heavy pulsing synth bass for high-tempo tracking"
+        },
+        {
+          "name": "Herzog Zwei",
+          "gd3_name_hint": "Herzog Zwei",
+          "notes": "Early techno/rock hybrid with pristine stereo panning adjustments"
+        },
+        {
+          "name": "Sol-Deace",
+          "gd3_name_hint": "Sol-Deace",
+          "notes": "Technosoft shmup - raw energetic overdriven FM showcasing Technosoft channel priority allocations"
+        }
+      ]
+    },
+
+    {
+      "driver_id": 6,
+      "driver_name": "Konami Custom Driver",
+      "driver_token": "DRIVER_KONAMI",
+      "notes": "Bypassed Sega limitations, packing incredible instrument density and clean DAC percussion",
+      "games": [
+        {
+          "name": "Rocket Knight Adventures",
+          "gd3_name_hint": "Rocket Knight Adventures",
+          "notes": "Highly orchestral booming horn patches simulated via complex FM synthesis"
+        },
+        {
+          "name": "Sparkster",
+          "gd3_name_hint": "Sparkster: Rocket Knight Adventures 2",
+          "notes": "Faster tempos and highly complex pitch-bending routines"
+        },
+        {
+          "name": "Castlevania Bloodlines",
+          "gd3_name_hint": "Castlevania: Bloodlines",
+          "notes": "Michiru Yamane's progressive-rock masterpiece with haunting clear organ textures"
+        },
+        {
+          "name": "Contra Hard Corps",
+          "gd3_name_hint": "Contra: Hard Corps",
+          "notes": "Aggressive industrial high-bpm chaos with incredibly loud rapid-fire DAC samples"
+        },
+        {
+          "name": "TMNT Hyperstone Heist",
+          "gd3_name_hint": "Teenage Mutant Ninja Turtles: The Hyperstone Heist",
+          "notes": "Crisp digitized voice clips layered over popping synth slap bass"
+        }
+      ]
+    },
+
+    {
+      "driver_id": 7,
+      "driver_name": "Treasure Custom Driver",
+      "driver_token": "DRIVER_TREASURE",
+      "notes": "Hideyuki Suganami's driver - unique custom software PCM mixers, hardware pushed to bizarre extremes",
+      "games": [
+        {
+          "name": "Gunstar Heroes",
+          "gd3_name_hint": "Gunstar Heroes",
+          "notes": "Chaotic fast-paced tracks with busy sound effects and no audio dropouts"
+        },
+        {
+          "name": "Alien Soldier",
+          "gd3_name_hint": "Alien Soldier",
+          "notes": "Experimental micro-tonal avant-garde fusion music"
+        },
+        {
+          "name": "Dynamite Headdy",
+          "gd3_name_hint": "Dynamite Headdy",
+          "notes": "Playful dense orchestration with rapid instrument swapping on individual tracks"
+        },
+        {
+          "name": "Light Crusader",
+          "gd3_name_hint": "Light Crusader",
+          "notes": "Unusual somber progressive rock with unexpected acoustic-style simulations"
+        }
+      ]
+    },
+
+    {
+      "driver_id": 8,
+      "driver_name": "Software Creations / Tim Follin",
+      "driver_token": "DRIVER_FOLLIN",
+      "notes": "Totally unique engine turning YM2612 into a progressive rock synthesizer - software-modulated PWM, things no other driver did",
+      "games": [
+        {
+          "name": "Time Trax",
+          "gd3_name_hint": "Time Trax (Prototype)",
+          "notes": "Legendary synth solos and incredible software-modulated pulse-width tricks"
+        },
+        {
+          "name": "Gauntlet IV (Follin)",
+          "gd3_name_hint": "Gauntlet IV",
+          "notes": "Multi-part progressive rock epics making the Sega sound card sound like a Roland synth",
+          "_duplicate_note": "Same game as Sakimoto entry below, different music/driver"
+        },
+        {
+          "name": "Red Zone",
+          "gd3_name_hint": "Red Zone",
+          "notes": "Extreme software tricks to play back high-sample-rate audio alongside FM synthesis"
+        }
+      ]
+    },
+
+    {
+      "driver_id": 9,
+      "driver_name": "Sunsoft Custom Driver",
+      "driver_token": "DRIVER_SUNSOFT",
+      "notes": "Famous for rich fat basslines, mirroring their legendary DPCM bass prowess on NES",
+      "games": [
+        {
+          "name": "Batman",
+          "gd3_name_hint": "Batman",
+          "notes": "Deep rolling FM bass patches mimicking analog hardware synthesizers"
+        },
+        {
+          "name": "Superman",
+          "gd3_name_hint": "Superman",
+          "notes": "Complex heroic melodies through beautifully warm bass-heavy instrument library"
+        },
+        {
+          "name": "Aero the Acro-Bat",
+          "gd3_name_hint": "Aero the Acro-Bat",
+          "notes": "Sunsoft-published platform game - rich fat bass patches and characteristic Sunsoft FM warmth"
+        },
+        {
+          "name": "Flashback",
+          "gd3_name_hint": "Flashback: The Quest for Identity",
+          "notes": "Minimalist cinematic ambient design showing how the engine handled quiet sustained notes"
+        }
+      ]
+    },
+
+    {
+      "driver_id": 10,
+      "driver_name": "Hyper-Optimized & Proprietary Oddities",
+      "driver_token": "DRIVER_PROPRIETARY",
+      "notes": "Completely bespoke single-developer or rare proprietary engines squeezing unique textures from the silicon",
+      "games": [
+        {
+          "name": "Adventures of Batman & Robin",
+          "gd3_name_hint": "The Adventures of Batman and Robin",
+          "notes": "Jesper Kyd / Zyrinx - unbelievable 44kHz custom PCM streaming for pure 90s European club techno"
+        },
+        {
+          "name": "Sub-Terrania",
+          "gd3_name_hint": "Sub-Terrania",
+          "notes": "Jesper Kyd / Zyrinx early iteration - atmospheric electronic soundscapes"
+        },
+        {
+          "name": "Mega Turrican",
+          "gd3_name_hint": "Mega Turrican",
+          "notes": "Chris Huelsbeck custom - optimized European Amiga-style tracker music on Genesis hardware"
+        },
+        {
+          "name": "Gauntlet IV (Sakimoto)",
+          "gd3_name_hint": "Gauntlet IV",
+          "notes": "Hitoshi Sakimoto's Terpsichore driver - rapid software micro-tuning and echoing",
+          "_duplicate_note": "Same game as Follin entry above, different music/driver"
+        },
+        {
+          "name": "Master of Monsters",
+          "gd3_name_hint": "Master of Monsters",
+          "notes": "Sakimoto Terpsichore early example - rich chords, signature synth-orchestral sound"
+        },
+        {
+          "name": "Midnight Resistance",
+          "gd3_name_hint": "Midnight Resistance",
+          "notes": "Data East Custom - industrial arcade rock with distinctively sharp glassy FM timbre"
+        },
+        {
+          "name": "Vapor Trail",
+          "gd3_name_hint": "Vapor Trail",
+          "notes": "Data East Custom - blazing heavy metal with highly unconventional FM guitar setups"
+        },
+        {
+          "name": "Panorama Cotton",
+          "gd3_name_hint": "Panorama Cotton",
+          "notes": "Success Custom - hyper-fast pseudo-orchestral with highly chaotic channel swapping"
+        },
+        {
+          "name": "Star Cruiser",
+          "gd3_name_hint": "Star Cruiser",
+          "notes": "Namco/Crying Custom - deep spacey synth pads with long attack/decay rarely heard on system"
+        },
+        {
+          "name": "Pier Solar and the Great Architects",
+          "gd3_name_hint": "Pier Solar and the Great Architects",
+          "notes": "Modern SGDK homebrew (2010/2014) - clean contemporary multi-channel PCM mixing over optimized FM"
+        }
+      ]
+    }
+
+  ],
+
+  "_implementation_notes": {
+    "total_games": 63,
+    "num_games_slot": 64,
+    "token_range": "GAME_BASE to GAME_BASE+63, UNK_GAME = GAME_BASE+64",
+    "gd3_matching": "gd3_name_hint strings are approximate - must verify against actual corpus GD3 game_name_en values before finalizing. Use _normalize_game_name() for comparison.",
+    "driver_tokens": "10 driver types defined. Consider adding DRIVER_BASE token range to tokenizer_v7 (in the 936-959 reserved range) to provide explicit driver conditioning alongside GAME token.",
+    "changes_needed": [
+      "Add GameMapV7.build_curated(json_path) classmethod that assigns token IDs from curated list order, maps everything else to UNK_GAME",
+      "Optionally add DRIVER_BASE token range (10 tokens) to tokenizer_v7 header",
+      "Optionally emit DRIVER token in token stream header alongside GAME token",
+      "Verify all 63 gd3_name_hint strings match actual corpus GD3 tags (run scan script first)",
+      "Decide whether Comix Zone and Gauntlet IV duplicates get same or different token IDs"
+    ]
+  }
+}

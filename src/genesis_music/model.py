@@ -333,6 +333,7 @@ class VgmGPT(nn.Module):
         kv_caches: list[KVCache] | None = None,
         start_pos: int = 0,
         use_cache: bool = False,
+        loss_weights: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         """Forward pass.
 
@@ -388,9 +389,10 @@ class VgmGPT(nn.Module):
 
         if labels is not None:
             loss = F.cross_entropy(
-                logits.view(-1, logits.size(-1)),
-                labels.view(-1),
+                logits.reshape(-1, logits.size(-1)),
+                labels.reshape(-1),
                 ignore_index=-100,
+                weight=loss_weights,
             )
             result["loss"] = loss
 

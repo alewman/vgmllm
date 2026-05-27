@@ -10,19 +10,23 @@ Vocabulary: 794 tokens (660 original v6 + 134 new metadata tokens).
 
 FM parameter token ranges (appended after v4 vocab):
 
-  IDs 456–463  FM_ALG_BASE   algorithm 0–7
-  IDs 464–471  FM_P8_BASE    8-value range (feedback, detune)
-  IDs 472–475  FM_P4_BASE    4-value range (ams, ks)
-  IDs 476–483  FM_FMS_BASE   fms 0–7
-  IDs 484–611  FM_TL_BASE    total level 0–127
-  IDs 612–643  FM_AR32_BASE  5-bit range (ar, dr, sr 0–31)
-  IDs 644–659  FM_P16_BASE   4-bit range (rr, sl, mul 0–15)
+  IDs 621–628  FM_ALG_BASE   algorithm 0–7
+  IDs 629–636  FM_P8_BASE    8-value range (feedback, detune)
+  IDs 637–640  FM_P4_BASE    4-value range (ams, ks)
+  IDs 641–648  FM_FMS_BASE   fms 0–7
+  IDs 649–776  FM_TL_BASE    total level 0–127
+  IDs 777–808  FM_AR32_BASE  5-bit range (ar, dr, sr 0–31)
+  IDs 809–824  FM_P16_BASE   4-bit range (rr, sl, mul 0–15)
 
 New metadata token ranges:
 
-  IDs 660–787  GAME_BASE     game title ID 0–127
-  IDs 788      UNK_GAME
-  IDs 789–793  CTX_*         track context (LEVEL/BOSS/TITLE/CREDITS/GAMEOVER)
+  IDs 825–888  GAME_BASE     game title ID 0–63
+  IDs 889      UNK_GAME
+  IDs 890–897  CTX_* / LOOP  track context + loop indicator
+
+Note: TEMPO_BINS expanded to 181 entries (60–240 BPM at 1 BPM steps) in v6.2,
+shifting all IDs from KEY_BASE onwards by +165 vs v6.0/v6.1.
+VOCAB_SIZE = 898.
 
 Per-FM-channel header block (40 tokens):
   ALG, FB, AMS, FMS,
@@ -74,40 +78,41 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 #
 # IDs 0–3    Special
-# IDs 4–19   Tempo (16 bins)
-# IDs 20–43  Key (24: 12 major + 12 minor)
-# IDs 44–47  Meter
-# IDs 48     BAR
-# IDs 49–64  BEAT_0 … BEAT_15 (16th-note positions within a bar)
-# IDs 65     PHRASE_END
-# IDs 66–71  CH_FM_0 … CH_FM_5
-# IDs 72     CH_DAC_TOK
-# IDs 73–75  CH_PSG_0_TOK … CH_PSG_2_TOK
-# IDs 76–82  ROLE tokens (7)
-# IDs 83–210 PATCH_0 … PATCH_127  (unused in encode; kept for compat)
-# IDs 211–213 NOTE_ON / NOTE_OFF / NOTE_HOLD
-# IDs 214–301 PITCH_0 … PITCH_87  (MIDI 24–111)
-# IDs 302–317 VEL_0 … VEL_15
-# IDs 318–325 DAC_HIT_0 … DAC_HIT_7
-# IDs 326    PSG_NOISE_HIT
-# IDs 327–454 COMPOSER_0 … COMPOSER_127
-# IDs 455    UNK_COMPOSER
-# IDs 456–463 FM_ALG_BASE   algorithm 0–7
-# IDs 464–471 FM_P8_BASE    8-value range (feedback, detune)
-# IDs 472–475 FM_P4_BASE    4-value range (ams, ks)
-# IDs 476–483 FM_FMS_BASE   fms 0–7
-# IDs 484–611 FM_TL_BASE    total level 0–127
-# IDs 612–643 FM_AR32_BASE  5-bit range: ar, dr, sr 0–31
-# IDs 644–659 FM_P16_BASE   4-bit range: rr, sl, mul 0–15
-# IDs 660–723 GAME_BASE     game title 0–63  (top 64 games; ≥34 tracks)
-# IDs 724    UNK_GAME
-# IDs 725    CTX_LEVEL  (default: stage/level music)
-# IDs 726    CTX_BOSS
-# IDs 727    CTX_TITLE
-# IDs 728    CTX_CREDITS
-# IDs 729    CTX_GAMEOVER
-# IDs 730    LOOP_PRESENT  (VGM loop_offset != 0)
-# IDs 731    LOOP_ABSENT
+# IDs 4–184  Tempo (181 bins, 60–240 BPM at 1 BPM steps)
+# IDs 185–208 Key (24: 12 major + 12 minor)
+# IDs 209–212 Meter
+# IDs 213    BAR
+# IDs 214–229 BEAT_0 … BEAT_15 (16th-note positions within a bar)
+# IDs 230    PHRASE_END
+# IDs 231–236 CH_FM_0 … CH_FM_5
+# IDs 237    CH_DAC_TOK
+# IDs 238–240 CH_PSG_0_TOK … CH_PSG_2_TOK
+# IDs 241–247 ROLE tokens (7)
+# IDs 248–375 PATCH_0 … PATCH_127  (unused in encode; kept for compat)
+# IDs 376–378 NOTE_ON / NOTE_OFF / NOTE_HOLD
+# IDs 379–466 PITCH_0 … PITCH_87  (MIDI 24–111)
+# IDs 467–482 VEL_0 … VEL_15
+# IDs 483–490 DAC_HIT_0 … DAC_HIT_7
+# IDs 491    PSG_NOISE_HIT
+# IDs 492–619 COMPOSER_0 … COMPOSER_127
+# IDs 620    UNK_COMPOSER
+# IDs 621–628 FM_ALG_BASE   algorithm 0–7
+# IDs 629–636 FM_P8_BASE    8-value range (feedback, detune)
+# IDs 637–640 FM_P4_BASE    4-value range (ams, ks)
+# IDs 641–648 FM_FMS_BASE   fms 0–7
+# IDs 649–776 FM_TL_BASE    total level 0–127
+# IDs 777–808 FM_AR32_BASE  5-bit range: ar, dr, sr 0–31
+# IDs 809–824 FM_P16_BASE   4-bit range: rr, sl, mul 0–15
+# IDs 825–888 GAME_BASE     game title 0–63  (top 64 games; ≥34 tracks)
+# IDs 889    UNK_GAME
+# IDs 890    CTX_LEVEL  (default: stage/level music)
+# IDs 891    CTX_BOSS
+# IDs 892    CTX_TITLE
+# IDs 893    CTX_CREDITS
+# IDs 894    CTX_GAMEOVER
+# IDs 895    LOOP_PRESENT  (VGM loop_offset != 0)
+# IDs 896    LOOP_ABSENT
+# IDs 897    CTX_UNKNOWN
 # IDs 732    CTX_UNKNOWN   (uninformative / missing track name)
 # VOCAB_SIZE  733
 # ---------------------------------------------------------------------------
@@ -118,62 +123,63 @@ EOS = 2
 UNK = 3
 
 TEMPO_BASE = 4
-KEY_BASE   = 20
-METER_44   = 44
-METER_34   = 45
-METER_68   = 46
-METER_24   = 47
+# TEMPO_BINS has 181 entries (60–240 at 1 BPM step) → IDs 4–184
+KEY_BASE   = 185   # 4 + 181
+METER_44   = 209   # KEY_BASE + 24
+METER_34   = 210
+METER_68   = 211
+METER_24   = 212
 
-BAR        = 48
-BEAT_BASE  = 49
-PHRASE_END = 65
+BAR        = 213
+BEAT_BASE  = 214
+PHRASE_END = 230
 
-CH_FM_BASE  = 66
-CH_DAC_TOK  = 72
-CH_PSG_BASE = 73
+CH_FM_BASE  = 231
+CH_DAC_TOK  = 237
+CH_PSG_BASE = 238
 
-ROLE_TOKEN_BASE = 76
+ROLE_TOKEN_BASE = 241
 _ROLE_ORDER = [ROLE_BASS, ROLE_LEAD, ROLE_HARM,
                ROLE_COUNTER, ROLE_DRUMS, ROLE_PERC, ROLE_UNK]
 ROLE_TO_TOKEN = {r: ROLE_TOKEN_BASE + i for i, r in enumerate(_ROLE_ORDER)}
 TOKEN_TO_ROLE = {v: k for k, v in ROLE_TO_TOKEN.items()}
 
-PATCH_BASE  = 83          # kept for backward compat / not used in encode
+PATCH_BASE  = 248          # kept for backward compat / not used in encode
 NUM_PATCHES = 128
 
-NOTE_ON   = 211
-NOTE_OFF  = 212
-NOTE_HOLD = 213
+NOTE_ON   = 376
+NOTE_OFF  = 377
+NOTE_HOLD = 378
 
-PITCH_BASE     = 214
+PITCH_BASE     = 379
 PITCH_MIN_MIDI = 24
 PITCH_MAX_MIDI = 111
 NUM_PITCHES    = PITCH_MAX_MIDI - PITCH_MIN_MIDI + 1   # 88
 
-VEL_BASE = 302
+VEL_BASE = 467
 
 NUM_DAC_SLOTS = 8
-DAC_HIT_BASE  = 318
+DAC_HIT_BASE  = 483
 DAC_HIT_UNK   = DAC_HIT_BASE
 DAC_HIT       = DAC_HIT_BASE
 
-PSG_NOISE_HIT = 326
+PSG_NOISE_HIT = 491
 
-COMPOSER_BASE = 327
+COMPOSER_BASE = 492
 NUM_COMPOSERS = 128
-UNK_COMPOSER  = COMPOSER_BASE + NUM_COMPOSERS  # 455
+UNK_COMPOSER  = COMPOSER_BASE + NUM_COMPOSERS  # 620
 
 # ---------------------------------------------------------------------------
 # New in v6: direct FM parameter tokens
 # ---------------------------------------------------------------------------
 
-FM_ALG_BASE  = 456   # algorithm 0–7        (8 tokens)
-FM_P8_BASE   = 464   # 8-value range        (8 tokens)  feedback, detune
-FM_P4_BASE   = 472   # 4-value range        (4 tokens)  ams, ks
-FM_FMS_BASE  = 476   # fms 0–7              (8 tokens)
-FM_TL_BASE   = 484   # total level 0–127    (128 tokens)
-FM_AR32_BASE = 612   # 5-bit range 0–31     (32 tokens)  ar, dr, sr
-FM_P16_BASE  = 644   # 4-bit range 0–15     (16 tokens)  rr, sl, mul
+FM_ALG_BASE  = 621   # algorithm 0–7        (8 tokens)
+FM_P8_BASE   = 629   # 8-value range        (8 tokens)  feedback, detune
+FM_P4_BASE   = 637   # 4-value range        (4 tokens)  ams, ks
+FM_FMS_BASE  = 641   # fms 0–7              (8 tokens)
+FM_TL_BASE   = 649   # total level 0–127    (128 tokens)
+FM_AR32_BASE = 777   # 5-bit range 0–31     (32 tokens)  ar, dr, sr
+FM_P16_BASE  = 809   # 4-bit range 0–15     (16 tokens)  rr, sl, mul
 
 FM_PATCH_TOKENS = 40  # tokens per FM channel in header
 
@@ -181,22 +187,22 @@ FM_PATCH_TOKENS = 40  # tokens per FM channel in header
 # Game map and track-context tokens  (new in v6.1)
 # ---------------------------------------------------------------------------
 
-GAME_BASE    = 660   # game title ID 0–63  (top-64 games; ≥34 tracks each)
+GAME_BASE    = 825   # game title ID 0–63  (top-64 games; ≥34 tracks each)
 NUM_GAMES    = 64
-UNK_GAME     = GAME_BASE + NUM_GAMES         # 724
+UNK_GAME     = GAME_BASE + NUM_GAMES         # 889
 
-CTX_BASE     = 725   # track context tokens (6 tokens)
-CTX_LEVEL    = 725   # default: in-level / stage music
-CTX_BOSS     = 726   # boss encounter
-CTX_TITLE    = 727   # title screen / menu
-CTX_CREDITS  = 728   # staff roll / ending / credits
-CTX_GAMEOVER = 729   # game over / continue
-CTX_UNKNOWN  = 732   # uninformative / missing / all-non-ASCII track name
+CTX_BASE     = 890   # track context tokens (6 tokens)
+CTX_LEVEL    = 890   # default: in-level / stage music
+CTX_BOSS     = 891   # boss encounter
+CTX_TITLE    = 892   # title screen / menu
+CTX_CREDITS  = 893   # staff roll / ending / credits
+CTX_GAMEOVER = 894   # game over / continue
+CTX_UNKNOWN  = 897   # uninformative / missing / all-non-ASCII track name
 
-LOOP_PRESENT = 730   # VGM loop_offset != 0  (track loops)
-LOOP_ABSENT  = 731   # no loop
+LOOP_PRESENT = 895   # VGM loop_offset != 0  (track loops)
+LOOP_ABSENT  = 896   # no loop
 
-VOCAB_SIZE = 733
+VOCAB_SIZE = 898
 
 
 # ---------------------------------------------------------------------------
@@ -591,7 +597,10 @@ class TokenizerV6:
     beats_per_bar : int
         Default 4.
     subdivisions : int
-        16th-note grid resolution.  Default 16.
+        Beat-slot grid size.  Always 16 (full BEAT token range, IDs 214–229).
+        For 4/4 songs each slot is a 16th note; for 2/4 songs each slot is a
+        32nd note (the bar spans the same 16 slots at finer per-slot granularity).
+        Default 16.
     """
 
     def __init__(
@@ -730,17 +739,27 @@ class TokenizerV6:
         if not note_events:
             return []
 
-        bpm       = analysis.tempo_bpm
+        # Use the quantized BPM that will be stored in the TEMPO token so that
+        # bar/beat slot numbers round-trip to the same sample positions in decode().
+        # Using analysis.tempo_bpm (actual) here while decode() uses the quantized
+        # value caused systematic linear timing drift of ~24 ms/bar.
+        bpm       = float(TEMPO_BINS[tempo_to_token(analysis.tempo_bpm) - TEMPO_BASE])
         meter_num = analysis.meter_numerator
         meter_den = analysis.meter_denominator
 
-        # Each grid slot = one 16th note regardless of meter, so BAR/BEAT
-        # tokens are always musically meaningful subdivisions.
-        # Slots per bar: beats × 4 (for /4 time) or beats × 2 (for /8 time).
-        sixteenth     = SAMPLE_RATE * 60.0 / bpm / 4.0
-        slots_per_bar = meter_num * (4 if meter_den == 4 else 2)
-        bar_samples   = sixteenth * slots_per_bar
-        beat_samples  = sixteenth  # one slot = one 16th note
+        # Grid resolution: always 16 slots per bar (the full BEAT token range).
+        # beat_samples adapts to the meter so 2/4 gets 32nd-note granularity
+        # and 4/4 keeps 16th-note granularity — no vocab changes required.
+        #
+        # 2/4 example (113 BPM): bar = 8 × sixteenth = 46 839 samp
+        #   beat_samples = 46 839 / 16 = 2 927 samp = 66 ms  (32nd note)
+        # 4/4 example (113 BPM): bar = 16 × sixteenth = 93 678 samp
+        #   beat_samples = 93 678 / 16 = 5 855 samp = 133 ms (16th note)
+        sixteenth            = SAMPLE_RATE * 60.0 / bpm / 4.0
+        bar_sixteenth_count  = meter_num * (4 if meter_den == 4 else 2)  # 16th notes per bar
+        slots_per_bar        = 16                                          # always use all beat slots
+        bar_samples          = sixteenth * bar_sixteenth_count             # bar length unchanged
+        beat_samples         = bar_samples / slots_per_bar                 # adapts to meter
 
         events_by_time: list[tuple[int, str, NoteEvent]] = []
         for e in note_events:
@@ -759,11 +778,33 @@ class TokenizerV6:
 
         for sample_pos, kind, event in events_by_time:
             bar  = int(sample_pos / bar_samples)
-            beat = int((sample_pos % bar_samples) / beat_samples)
-            beat = min(beat, self.subdivisions - 1)
+            # Round to the nearest 16th-note slot instead of flooring.  Floor
+            # quantization caused a systematic ~65 ms early-bias: notes near the
+            # END of a slot were placed at the START, up to 133 ms early.  With
+            # round, the max error is ±66 ms and the mean bias is ~0, which also
+            # eliminates the audible "stutter" at section boundaries where
+            # previously the timing would snap 130 ms forward.
+            beat_frac = (sample_pos % bar_samples) / beat_samples
+            # Use round-half-up (int(x+0.5)) instead of Python's banker's round()
+            # so that notes exactly at a half-slot boundary round UP to the later
+            # slot rather than the nearer-even slot.  Without this, a note spaced
+            # exactly 2.5 slots from the previous one would round to 2 (banker's)
+            # instead of 3, creating a visible clustering in the Synthesia piano-
+            # roll every 3-4 notes.
+            beat = int(beat_frac + 0.5)
+            if beat >= slots_per_bar:
+                beat = 0
+                bar += 1   # note rounds into the next bar
 
             if bar != current_bar:
-                tokens.append(BAR)
+                # Emit one BAR token per bar advanced so that multi-bar silence
+                # gaps (inter-section breaks) are faithfully preserved.  The old
+                # code always emitted a single BAR token, which caused the decoder
+                # to lose N-1 bars for every N-bar gap — up to 8.6 s of drift on
+                # a 2-minute song.
+                n_bars = (bar - current_bar) if current_bar >= 0 else (bar + 1)
+                for _ in range(n_bars):
+                    tokens.append(BAR)
                 current_bar  = bar
                 current_beat = -1
 
@@ -911,10 +952,11 @@ class TokenizerV6:
 
         bpm = header["tempo_bpm"]
         meter_num, meter_den = header["meter"]
-        sixteenth     = SAMPLE_RATE * 60.0 / bpm / 4.0
-        slots_per_bar = meter_num * (4 if meter_den == 4 else 2)
-        bar_samples   = int(sixteenth * slots_per_bar)
-        beat_samples  = max(1, int(sixteenth))  # one slot = one 16th note
+        sixteenth            = SAMPLE_RATE * 60.0 / bpm / 4.0
+        bar_sixteenth_count  = meter_num * (4 if meter_den == 4 else 2)  # 16th notes per bar
+        slots_per_bar        = 16                                          # always use all beat slots
+        bar_samples          = max(1, int(sixteenth * bar_sixteenth_count))  # bar length unchanged
+        beat_samples         = max(1, int(bar_samples / slots_per_bar))      # adapts to meter
 
         note_events: list[NoteEvent] = []
         open_notes: dict[int, NoteEvent] = {}

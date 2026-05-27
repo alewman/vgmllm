@@ -12,7 +12,7 @@ Reference:
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as _dc_replace
 from typing import Iterator
 
 from .vgm_parser import EventType, VgmEvent, VgmFile
@@ -175,6 +175,7 @@ class Ym2612Patch:
             self.mul, self.dt, self.ks,
             self.ams, self.fms,
             self.am_en, self.ssg_eg,
+            self.pan,
         )
 
 
@@ -202,6 +203,28 @@ class NoteEvent:
     # game music composers to shape note decay/articulation without using key-off
     # (the "TL-fade envelope" technique).  Empty for most notes.
     tl_envelope: list = field(default_factory=list)
+
+    # For PSG tone channels: list of (absolute_sample, raw_attenuation) pairs
+    # capturing mid-note volume changes (ADSR envelopes, tremolo, fades).
+    # raw_attenuation is the raw SN76489 attenuation register value (0=loudest,
+    # 14=quietest audible, 15=silence).  Stored raw to avoid double-conversion
+    # loss.  Empty for most notes; non-empty when a PSG note has a volume
+    # envelope (very common in Sega Genesis / Sonic-era music).
+    vol_envelope: list = field(default_factory=list)
+
+    # For FM channels: list of (absolute_sample, pan_value) pairs capturing
+    # mid-note stereo pan changes (pan modulation / auto-pan).  pan_value is
+    # the 2-bit LR field (3=both, 2=R, 1=L, 0=off) from reg 0xB4-0xB6 bits
+    # 7:6.  Only contains changes AFTER the late-pan correction window (~200
+    # samples from key-on); earlier changes are folded into patch.pan.
+    pan_envelope: list = field(default_factory=list)
+
+    # For PSG noise channel (CH_PSG_NOISE) only: the 4-bit noise control
+    # register value captured at note-on.  Bit 2: 1=white noise, 0=periodic.
+    # Bits 1:0: shift rate (0=low, 1=medium, 2=high, 3=use-CH2-freq).
+    # Default 0x07 = white noise + use-CH2-freq (the pre-fix hardcoded value).
+    # Stored as the raw 4-bit value; emitted as 0xE0 | noise_mode in synthesis.
+    noise_mode: int = 0x07
 
     @property
     def duration_samples(self) -> int:
@@ -476,7 +499,8 @@ class Ym2612State:
         for ch_idx, ch in enumerate(self.channels):
             if ch.open_note is not None:
                 note = ch.open_note
-                note.sample_off = final
+                if note.sample_off < 0:  # never got a key-off
+                    note.sample_off = final
                 ch.open_note = None
                 ch.key_on = False
                 yield note
@@ -554,7 +578,7 @@ class Ym2612State:
                 # Store (sample, fnum, block) — 3-element to distinguish from
                 # PSG 2-element (sample, period) tuples in pitch_envelope.
                 ch_state = self.channels[ch]
-                if ch_state.key_on and ch_state.open_note is not None:
+                if ch_state.open_note is not None:
                     fnum  = ch_state.fnum   # updated fnum_lo already applied above
                     block = ch_state.block
                     pe = ch_state.open_note.pitch_envelope
@@ -581,9 +605,29 @@ class Ym2612State:
         if 0xB4 <= reg <= 0xB6:
             ch = reg - 0xB4 + ch_offset
             if 0 <= ch < 6:
-                self.channels[ch].lr  = (val >> 6) & 0x03
+                new_lr = (val >> 6) & 0x03
+                self.channels[ch].lr  = new_lr
                 self.channels[ch].ams = (val >> 4) & 0x03
                 self.channels[ch].fms = val & 0x07
+                # Late-pan correction: some drivers write the pan register up to
+                # ~200 samples AFTER key-on (e.g. MUSHA Aleste percussion on FM5).
+                # If there is an open note on this channel that was started within
+                # the last PAN_UPDATE_WINDOW samples, retroactively fix its pan so
+                # the synthesised roundtrip emits the correct stereo position.
+                ch_state = self.channels[ch]
+                _PAN_UPDATE_WINDOW = 200
+                if ch_state.open_note is not None:
+                    age = self._current_sample - ch_state.open_note.sample_on
+                    if ch_state.open_note.patch is not None and age <= _PAN_UPDATE_WINDOW:
+                        # Within the late-pan window: fold into patch (MUSHA-style)
+                        ch_state.open_note.patch = _dc_replace(
+                            ch_state.open_note.patch, pan=new_lr
+                        )
+                    elif age > _PAN_UPDATE_WINDOW:
+                        # Mid-note pan modulation: record for pan_envelope replay
+                        ch_state.open_note.pan_envelope.append(
+                            (self._current_sample, new_lr)
+                        )
             return
 
         # ---- Per-operator registers (0x30 – 0x9F) ----
@@ -662,9 +706,12 @@ class Ym2612State:
             # The YM2612 hardware resets the operator envelopes on every Key
             # On regardless of whether the channel was already keyed-on, so
             # each re-trigger is a genuinely new note event.
-            if ch_state.key_on and ch_state.open_note is not None:
+            # Also handles the "decaying" state where key_on=False but
+            # open_note is still alive (collecting post-key-off pitch slides).
+            if ch_state.open_note is not None:
                 old_note = ch_state.open_note
-                old_note.sample_off = self._current_sample
+                if old_note.sample_off < 0:  # still playing — set key-off now
+                    old_note.sample_off = self._current_sample
                 ch_state.open_note  = None
                 ch_state.key_on     = False
                 yield old_note
@@ -689,13 +736,14 @@ class Ym2612State:
             # Do NOT yield here — yield only when note is closed (key-off/retrigger/EOF)
 
         elif not key_on and ch_state.key_on:
-            # KEY OFF: close the open note
+            # KEY OFF: mark the note's key-off time but keep open_note alive
+            # so that subsequent FNUM/pitch changes during the release phase
+            # (pitch slides common in FM percussion) are captured in
+            # pitch_envelope and reproduced in the roundtrip.
+            # The note is yielded when the NEXT key-on arrives (or at EOF).
             ch_state.key_on = False
             if ch_state.open_note is not None:
-                note = ch_state.open_note
-                note.sample_off = self._current_sample
-                ch_state.open_note = None
-                yield note
+                ch_state.open_note.sample_off = self._current_sample
 
 
 # ---------------------------------------------------------------------------
@@ -805,10 +853,11 @@ class Sn76489State:
 
             ch_id = CH_PSG_0 + ch_idx if ch_idx < 3 else CH_PSG_NOISE
             note = NoteEvent(
-                channel   = ch_id,
-                pitch     = pitch,
-                velocity  = ch.psg_velocity(),
-                sample_on = self._current_sample,
+                channel    = ch_id,
+                pitch      = pitch,
+                velocity   = ch.psg_velocity(),
+                sample_on  = self._current_sample,
+                noise_mode = ch.period if ch_idx == 3 else 0x07,
             )
             ch.key_on       = True
             ch.open_note    = note
@@ -821,6 +870,13 @@ class Sn76489State:
                 ch.open_note.sample_off = self._current_sample
                 yield ch.open_note
                 ch.open_note = None
+
+        elif not was_silent and not now_silent:
+            # Mid-note volume change — record as a vol_envelope waypoint.
+            # raw_attenuation is stored directly (0=loudest, 14=quietest audible)
+            # so synthesis can emit it without conversion loss.
+            if ch.open_note is not None:
+                ch.open_note.vol_envelope.append((self._current_sample, new_vol))
 
 
 # ---------------------------------------------------------------------------

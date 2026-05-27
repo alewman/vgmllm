@@ -41,8 +41,10 @@ _KK_MINOR = np.array(
     [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17]
 )
 
-# BPM bins used in the v4 token vocabulary
-TEMPO_BINS = [60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 170, 180, 200, 220, 240]
+# BPM bins used in the tokenizer vocabulary.
+# 1 BPM resolution from 60–240 (181 bins) gives ≤0.5 BPM quantisation error,
+# reducing tempo-induced timing drift by ~10× vs the old 10 BPM step bins.
+TEMPO_BINS = list(range(60, 241))  # [60, 61, 62, …, 240]  — 181 entries
 
 # Key names in chromatic order (index 0=C)
 KEY_NAMES_MAJOR = ["C",  "C#", "D",  "D#", "E",  "F",

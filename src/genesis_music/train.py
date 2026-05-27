@@ -27,6 +27,7 @@ from .model import VgmGPT, ModelConfig
 from .dataset import load_datasets
 from .dataset_v4 import load_datasets_v4
 from .dataset_v6 import load_datasets_v6
+from .dataset_v7 import load_datasets_v7
 
 log = logging.getLogger(__name__)
 
@@ -52,7 +53,7 @@ class TrainConfig:
     model_size: str = "medium"         # small, medium, large
 
     # Tokenizer / vocabulary
-    tokenizer: str = "v6"    # "v3" (legacy), "v4", or "v6"
+    tokenizer: str = "v6"    # "v3" (legacy), "v4", "v6", or "v7"
 
     # Logging & checkpoints
     log_interval: int = 10
@@ -67,6 +68,20 @@ class TrainConfig:
 
     # Stability
     z_loss: float = 0.0   # PaLM-style z-loss weight (λ≈1e-4); 0.0 = off
+
+    # Layer-wise LR decay (LLRD)
+    llrd_enabled: bool = False
+    llrd_decay: float = 0.85            # per-layer lr multiplier (last layer = 1.0)
+    llrd_embedding_scale: float = 0.5   # embedding lr relative to global lr
+
+    # Curriculum learning
+    curriculum_enabled: bool = False
+    curriculum_init_seq_len: int = 1024
+    curriculum_target_seq_len: int = 8192
+    curriculum_warmup_steps: int = 8000
+
+    # Rare-token loss upweighting
+    rare_token_weight: float = 1.0      # weight for rare hw-state tokens (1.0 = off)
 
 
 def _get_lr(step: int, config: TrainConfig) -> float:
@@ -144,7 +159,13 @@ def train(config: TrainConfig):
         log.info("Using float16 mixed precision")
 
     # Load data
-    if config.tokenizer == "v6":
+    if config.tokenizer == "v7":
+        train_loader, val_loader, _pack_loader, meta = load_datasets_v7(
+            data_dir=config.data_dir,
+            seq_len=config.seq_len,
+            batch_size=config.batch_size,
+        )
+    elif config.tokenizer == "v6":
         train_loader, val_loader, _pack_loader, meta = load_datasets_v6(
             data_dir=config.data_dir,
             seq_len=config.seq_len,
@@ -198,24 +219,78 @@ def train(config: TrainConfig):
             log.warning("torch.compile failed, continuing without: %s", e)
 
     # Optimizer (AdamW with weight decay only on matmul weights)
-    decay_params = []
-    nodecay_params = []
-    for name, param in model.named_parameters():
-        if param.requires_grad:
-            if param.dim() >= 2:
-                decay_params.append(param)
-            else:
-                nodecay_params.append(param)
+    if config.llrd_enabled:
+        # Layer-wise learning-rate decay: deeper layers get exponentially smaller LRs.
+        # Last transformer layer → scale=1.0; layer k → scale=llrd_decay^(n_layers-1-k)
+        # Embeddings → scale=llrd_embedding_scale
+        param_groups: list[dict] = []
+        assigned: set[int] = set()  # track by id() to avoid duplicates (tied weights)
 
-    optimizer = torch.optim.AdamW(
-        [
-            {"params": decay_params, "weight_decay": config.weight_decay},
-            {"params": nodecay_params, "weight_decay": 0.0},
-        ],
-        lr=config.lr,
-        betas=(0.9, 0.95),
-        fused=True,
-    )
+        def _add_group(params, lr_scale, wd):
+            filtered = [p for p in params if p.requires_grad and id(p) not in assigned]
+            if filtered:
+                param_groups.append({
+                    "params": filtered,
+                    "lr": config.lr * lr_scale,
+                    "lr_scale": lr_scale,
+                    "weight_decay": wd,
+                })
+                assigned.update(id(p) for p in filtered)
+
+        # Embeddings and input dropout (lowest lr)
+        _add_group(list(model.tok_emb.parameters()),
+                   config.llrd_embedding_scale, config.weight_decay)
+
+        # Per-layer groups (layer 0 = bottom, layer n-1 = top)
+        n_layers = len(model.layers)
+        for i, layer in enumerate(model.layers):
+            lr_scale = config.llrd_decay ** (n_layers - 1 - i)
+            layer_p = list(layer.parameters())
+            _add_group([p for p in layer_p if p.dim() >= 2], lr_scale, config.weight_decay)
+            _add_group([p for p in layer_p if p.dim() < 2],  lr_scale, 0.0)
+
+        # Final norm and lm_head at top lr (scale=1.0)
+        head_params = list(model.norm.parameters()) + list(model.lm_head.parameters())
+        _add_group([p for p in head_params if p.dim() >= 2], 1.0, config.weight_decay)
+        _add_group([p for p in head_params if p.dim() < 2],  1.0, 0.0)
+
+        optimizer = torch.optim.AdamW(
+            param_groups, lr=config.lr, betas=(0.9, 0.95), fused=True,
+        )
+        log.info("LLRD enabled: %d param groups, decay=%.2f, emb_scale=%.2f",
+                 len(param_groups), config.llrd_decay, config.llrd_embedding_scale)
+    else:
+        decay_params = []
+        nodecay_params = []
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                if param.dim() >= 2:
+                    decay_params.append(param)
+                else:
+                    nodecay_params.append(param)
+
+        optimizer = torch.optim.AdamW(
+            [
+                {"params": decay_params, "weight_decay": config.weight_decay},
+                {"params": nodecay_params, "weight_decay": 0.0},
+            ],
+            lr=config.lr,
+            betas=(0.9, 0.95),
+            fused=True,
+        )
+
+    # Build per-vocabulary loss weight tensor for rare-token upweighting
+    loss_weights: torch.Tensor | None = None
+    if config.rare_token_weight != 1.0:
+        rare_ids = meta.get("rare_token_ids", [])
+        if rare_ids:
+            w = torch.ones(vocab_size, device=device)
+            for rid in rare_ids:
+                if rid < vocab_size:
+                    w[rid] = config.rare_token_weight
+            loss_weights = w
+            log.info("Rare-token loss weight: %.2f for %d token IDs",
+                     config.rare_token_weight, len(rare_ids))
 
     scaler = torch.amp.GradScaler("cuda", enabled=(dtype == torch.float16))
 
@@ -260,10 +335,10 @@ def train(config: TrainConfig):
     )
 
     for step in range(start_step, config.max_steps):
-        # Update learning rate
+        # Update learning rate (respects per-group lr_scale for LLRD)
         lr = _get_lr(step, config)
         for pg in optimizer.param_groups:
-            pg["lr"] = lr
+            pg["lr"] = lr * pg.get("lr_scale", 1.0)
 
         # Gradient accumulation
         optimizer.zero_grad(set_to_none=True)
@@ -280,8 +355,20 @@ def train(config: TrainConfig):
             input_ids = batch["input_ids"].to(device, non_blocking=True)
             labels = batch["labels"].to(device, non_blocking=True)
 
+            # Curriculum learning: linearly ramp up sequence length
+            if config.curriculum_enabled:
+                progress = min(1.0, step / max(1, config.curriculum_warmup_steps))
+                curr_len = int(
+                    config.curriculum_init_seq_len
+                    + (config.curriculum_target_seq_len - config.curriculum_init_seq_len)
+                    * progress
+                )
+                curr_len = min(curr_len, input_ids.size(1))
+                input_ids = input_ids[:, :curr_len]
+                labels    = labels[:, :curr_len]
+
             with torch.amp.autocast("cuda", dtype=dtype):
-                out = model(input_ids, labels=labels)
+                out = model(input_ids, labels=labels, loss_weights=loss_weights)
                 loss = out["loss"] / config.grad_accum_steps
 
             micro_loss = loss.item() * config.grad_accum_steps  # unnormalized
@@ -438,10 +525,29 @@ def main():
                         help="Enable torch.compile (not supported on Windows)")
     parser.add_argument("--gradient-checkpointing", action="store_true",
                         help="Enable gradient checkpointing to reduce VRAM")
-    parser.add_argument("--tokenizer", choices=["v3", "v4", "v6"], default="v6",
+    parser.add_argument("--tokenizer", choices=["v3", "v4", "v6", "v7"], default="v6",
                         help="Which tokenizer/vocab the data was prepared with")
     parser.add_argument("--z-loss", type=float, default=0.0,
                         help="PaLM z-loss weight (e.g. 1e-4); 0 = off")
+    # LLRD
+    parser.add_argument("--llrd", action="store_true",
+                        help="Enable layer-wise learning-rate decay")
+    parser.add_argument("--llrd-decay", type=float, default=0.85,
+                        help="Per-layer LR decay factor (default 0.85)")
+    parser.add_argument("--llrd-emb-scale", type=float, default=0.5,
+                        help="Embedding LR relative to global lr (default 0.5)")
+    # Curriculum learning
+    parser.add_argument("--curriculum", action="store_true",
+                        help="Enable curriculum learning (ramp seq_len)")
+    parser.add_argument("--curriculum-init", type=int, default=1024,
+                        help="Starting seq_len for curriculum")
+    parser.add_argument("--curriculum-target", type=int, default=8192,
+                        help="Target seq_len for curriculum")
+    parser.add_argument("--curriculum-warmup", type=int, default=8000,
+                        help="Steps to reach target seq_len")
+    # Rare-token loss
+    parser.add_argument("--rare-token-weight", type=float, default=1.0,
+                        help="Loss weight multiplier for rare hw-state tokens (>1 upweights)")
 
     args = parser.parse_args()
 
@@ -461,6 +567,14 @@ def main():
         gradient_checkpointing=args.gradient_checkpointing,
         tokenizer=args.tokenizer,
         z_loss=args.z_loss,
+        llrd_enabled=args.llrd,
+        llrd_decay=args.llrd_decay,
+        llrd_embedding_scale=args.llrd_emb_scale,
+        curriculum_enabled=args.curriculum,
+        curriculum_init_seq_len=args.curriculum_init,
+        curriculum_target_seq_len=args.curriculum_target,
+        curriculum_warmup_steps=args.curriculum_warmup,
+        rare_token_weight=args.rare_token_weight,
     )
 
     train(config)
