@@ -145,6 +145,52 @@ def detect_tempo(
     return float(np.clip(bpm, bpm_min, bpm_max))
 
 
+def detect_beat_phase(
+    note_events: list,
+    total_samples: int,
+    bpm: float,
+) -> float:
+    """Detect the phase offset (seconds) of the beat grid from t=0.
+
+    Fits a comb filter with period=beat_sec to the note-onset histogram and
+    returns the phase φ ∈ [0, beat_sec) that maximises onset coincidence.
+    Returns 0.0 if detection is unreliable.
+    """
+    if bpm <= 0:
+        return 0.0
+
+    onsets = sorted(
+        e.sample_on for e in note_events
+        if e.channel < CH_DAC and e.sample_on >= 0
+    )
+    if len(onsets) < 4:
+        return 0.0
+
+    bin_size          = 441   # ~10 ms, same as detect_tempo
+    beat_period_bins  = SAMPLE_RATE * 60.0 / bpm / bin_size
+    n_phase           = max(1, int(round(beat_period_bins)))
+    duration_bins     = max(1, total_samples // bin_size + 1)
+
+    onset_hist = np.zeros(duration_bins, dtype=np.float32)
+    for s in onsets:
+        onset_hist[min(s // bin_size, duration_bins - 1)] += 1.0
+
+    # For each candidate phase bin, sum onset_hist at all beat positions.
+    scores = np.zeros(n_phase, dtype=np.float64)
+    for phase_bin in range(n_phase):
+        # Integer beat-position indices for this phase
+        n_beats   = int((duration_bins - phase_bin) / beat_period_bins) + 1
+        beat_idxs = np.round(
+            phase_bin + np.arange(n_beats) * beat_period_bins
+        ).astype(np.int32)
+        beat_idxs = beat_idxs[beat_idxs < duration_bins]
+        if len(beat_idxs):
+            scores[phase_bin] = onset_hist[beat_idxs].sum()
+
+    best_phase_bin = int(np.argmax(scores))
+    return best_phase_bin * bin_size / SAMPLE_RATE
+
+
 def quantize_tempo(bpm: float) -> tuple[float, int]:
     """Snap a BPM to the nearest TEMPO_BIN.
 

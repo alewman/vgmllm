@@ -192,6 +192,7 @@ def _draw_background(
     dt:          float        = 0.0,  # seconds since last frame (for particles)
     bpm:         float        = 0.0,  # detected tempo for bar/beat grid lines
     beats_per_bar: int        = 4,    # time signature numerator
+    beat_phase:  float        = 0.0,  # phase offset: time of first downbeat (s)
 ) -> None:
     """Draw the synthesia background: fill, falling note bars, and piano keyboard."""
     import pygame
@@ -218,11 +219,11 @@ def _draw_background(
         import math as _math
         beat_sec = 60.0 / bpm
         bar_sec  = beat_sec * beats_per_bar
-        # which beat index is the first one visible?
-        first_beat = int(_math.floor(t_vis_start / beat_sec))
-        beat_idx   = first_beat
+        # first_beat: find the beat index whose time is ≤ t_vis_start
+        first_beat = int(_math.floor((t_vis_start - beat_phase) / beat_sec))
+        beat_idx   = max(first_beat, 0)
         while True:
-            bt = beat_idx * beat_sec
+            bt = beat_phase + beat_idx * beat_sec
             if bt > t_vis_end:
                 break
             y = int(_time_to_y(bt))
@@ -735,6 +736,7 @@ def _render_combined(
     dt: float = 0.0,
     bpm: float = 0.0,
     beats_per_bar: int = 4,
+    beat_phase: float = 0.0,
 ) -> None:
     """Composite one complete frame onto `surface`."""
     top_y = HEADER_H  # the falling zone starts here
@@ -745,7 +747,8 @@ def _render_combined(
         screen_w, screen_h, piano_h, top_y,
         dac_strip_w, pitch_min, pitch_max,
         white_w, black_w, min_white, piano_x0, font_key,
-        particles=particles, dt=dt, bpm=bpm, beats_per_bar=beats_per_bar,
+        particles=particles, dt=dt, bpm=bpm,
+        beats_per_bar=beats_per_bar, beat_phase=beat_phase,
     )
 
     # 2 – oscilloscope grid overlay (behind header, in front of falling notes)
@@ -804,8 +807,8 @@ def _prepare(args, vgm_path: Path):
     """
     # ── 1. Parse notes (no pygame needed) ─────────────────────────────────────
     print(f"Loading {vgm_path.name} …")
-    rects, total_sec, t_loop_start, bpm, beats_per_bar = _parse_notes(vgm_path)
-    print(f"  {len(rects)} note events, {total_sec:.1f}s  loop@{t_loop_start:.1f}s  ~{bpm:.1f} BPM ({beats_per_bar}/4)")
+    rects, total_sec, t_loop_start, bpm, beats_per_bar, beat_phase = _parse_notes(vgm_path)
+    print(f"  {len(rects)} note events, {total_sec:.1f}s  loop@{t_loop_start:.1f}s  ~{bpm:.1f} BPM ({beats_per_bar}/4)  phase={beat_phase*1000:.0f}ms")
     if getattr(args, 'bpm', None) is not None:
         bpm = float(args.bpm)
         print(f"  BPM override: {bpm:.2f}")
@@ -913,7 +916,7 @@ def _prepare(args, vgm_path: Path):
     font_key  = pygame.font.SysFont("monospace", 10)
 
     return (
-        rects, total_sec, t_loop_start, bpm, beats_per_bar,
+        rects, total_sec, t_loop_start, bpm, beats_per_bar, beat_phase,
         pitch_min, pitch_max, min_white, n_whites,
         white_w, black_w, piano_x0, DAC_STRIP_W,
         channels, mix_wav, mix_looped_wav, sample_rate,
@@ -928,7 +931,7 @@ def _prepare(args, vgm_path: Path):
 
 def _interactive(
     args, vgm_path,
-    rects, total_sec, t_loop_start, bpm, beats_per_bar,
+    rects, total_sec, t_loop_start, bpm, beats_per_bar, beat_phase,
     pitch_min, pitch_max, min_white, n_whites,
     white_w, black_w, piano_x0, dac_strip_w,
     channels, mix_wav, mix_looped_wav, sample_rate,
@@ -1040,6 +1043,7 @@ def _interactive(
             dt=spf,
             bpm=bpm,
             beats_per_bar=beats_per_bar,
+            beat_phase=beat_phase,
         )
 
         pygame.display.flip()
@@ -1091,7 +1095,7 @@ def _video_enc_args(args, ffmpeg_bin: str) -> list[str]:
 
 def _export_mp4(
     args, vgm_path,
-    rects, total_sec, t_loop_start, bpm, beats_per_bar,
+    rects, total_sec, t_loop_start, bpm, beats_per_bar, beat_phase,
     pitch_min, pitch_max, min_white, n_whites,
     white_w, black_w, piano_x0, dac_strip_w,
     channels, mix_wav, mix_looped_wav, sample_rate,
@@ -1166,6 +1170,7 @@ def _export_mp4(
                 dt=spf,
                 bpm=bpm,
                 beats_per_bar=beats_per_bar,
+                beat_phase=beat_phase,
             )
 
             raw = pygame.surfarray.array3d(surface)
@@ -1227,7 +1232,7 @@ def main() -> None:
         sys.exit(f"File not found: {vgm_path}")
 
     (
-        rects, total_sec, t_loop_start, bpm, beats_per_bar,
+        rects, total_sec, t_loop_start, bpm, beats_per_bar, beat_phase,
         pitch_min, pitch_max, min_white, n_whites,
         white_w, black_w, piano_x0, dac_strip_w,
         channels, mix_wav, mix_looped_wav, sample_rate,
@@ -1240,7 +1245,7 @@ def main() -> None:
     if args.mp4:
         _export_mp4(
             args, vgm_path,
-            rects, total_sec, t_loop_start, bpm, beats_per_bar,
+            rects, total_sec, t_loop_start, bpm, beats_per_bar, beat_phase,
             pitch_min, pitch_max, min_white, n_whites,
             white_w, black_w, piano_x0, dac_strip_w,
             channels, mix_wav, mix_looped_wav, sample_rate,
@@ -1252,7 +1257,7 @@ def main() -> None:
     else:
         _interactive(
             args, vgm_path,
-            rects, total_sec, t_loop_start, bpm, beats_per_bar,
+            rects, total_sec, t_loop_start, bpm, beats_per_bar, beat_phase,
             pitch_min, pitch_max, min_white, n_whites,
             white_w, black_w, piano_x0, dac_strip_w,
             channels, mix_wav, mix_looped_wav, sample_rate,
