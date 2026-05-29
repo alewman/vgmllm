@@ -276,12 +276,22 @@ def _draw_background(
             # Find every note at this pitch that temporally overlaps this one.
             # Use _pitch_all (full timeline) so the group composition — and thus
             # the gradient — is stable for the entire fall of each note.
-            same_time = [
+            same_time_raw = [
                 o for o in _pitch_all.get(nr.pitch, [])
                 if o.t_on < nr.t_off and o.t_off > nr.t_on
             ]
+            # Deduplicate by channel: a channel that re-triggers the same pitch
+            # appears once per note event but should contribute only one color
+            # band.  Keep the first occurrence of each channel so the gradient
+            # shows e.g. purple-yellow rather than purple-yellow-purple.
+            _seen_ch: set[int] = set()
+            same_time = []
+            for _o in same_time_raw:
+                if _o.channel not in _seen_ch:
+                    _seen_ch.add(_o.channel)
+                    same_time.append(_o)
             N   = len(same_time)
-            idx = next(i for i, o in enumerate(same_time) if o is nr)
+            idx = next((i for i, o in enumerate(same_time) if o is nr), 0)
 
             if N == 1:
                 # ── single channel: normal rounded bar ─────────────────────────
