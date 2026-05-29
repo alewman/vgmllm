@@ -188,7 +188,19 @@ def detect_beat_phase(
             scores[phase_bin] = onset_hist[beat_idxs].sum()
 
     best_phase_bin = int(np.argmax(scores))
-    return best_phase_bin * bin_size / SAMPLE_RATE
+    best_phase    = best_phase_bin * bin_size / SAMPLE_RATE
+    beat_sec      = 60.0 / bpm
+
+    # The comb filter finds the beat cycle that is most densely populated by
+    # onsets — often beat 2 or 3 in a bar, not beat 1.  Shift backward by
+    # whole beat periods until the phase is ≤ the first onset, so bar lines
+    # are anchored to the earliest note rather than the busiest one.
+    first_onset_sec = onsets[0] / SAMPLE_RATE
+    if best_phase > first_onset_sec:
+        k = math.ceil((best_phase - first_onset_sec) / beat_sec)
+        best_phase -= k * beat_sec
+
+    return max(0.0, best_phase)
 
 
 def quantize_tempo(bpm: float) -> tuple[float, int]:
