@@ -309,12 +309,19 @@ def is_active(audio: np.ndarray, threshold_rms: float = 1e-4) -> bool:
 
 def build_vgm_info(
     vgm_path: Path,
-) -> tuple[set[int], list[tuple[int, int]], list[tuple[int, int]]]:
+):
     """
     Decode VGM once and return:
       active_ids        — set of channel IDs that have notes
       dac_ranges        — sorted [(on_vgm_sample, off_vgm_sample)] for DAC
       ch3_special_ranges — sorted [(on, off)] for FM3 special-mode notes
+      per_ch_modes      — {ch_id: {badge_label: [(on, off), ...]}} for
+                          hardware mode badges per FM channel:
+                            "● VIB"  — LFO vibrato (lfo_en + fms > 0)
+                            "● TRE"  — LFO tremolo (lfo_en + ams > 0 + am_en)
+                            "● SSG"  — SSG-EG envelope enabled (any op bit 3)
+                            "● L"    — panned left only  (pan == 1)
+                            "● R"    — panned right only (pan == 2)
     All sample times are in VGM ticks @ 44100 Hz.
     """
     try:
@@ -322,7 +329,7 @@ def build_vgm_info(
         notes, _ = decode_vgm(vgm)
     except Exception as e:
         print(f"  Warning: could not parse VGM: {e}")
-        return set(range(11)), [], []
+        return set(range(11)), [], [], {}
 
     active_ids = set(n.channel for n in notes)
 
@@ -338,7 +345,56 @@ def build_vgm_info(
         ],
         key=lambda r: r[0],
     )
-    return active_ids, dac_ranges, ch3_special_ranges
+
+    # Per-channel hardware mode ranges (FM channels 0–5 only)
+    per_ch_modes: dict = {}
+    for n in notes:
+        if n.channel < 6 and n.patch:
+            modes = per_ch_modes.setdefault(n.channel, {})
+            p = n.patch
+            rng = (n.sample_on, n.sample_off)
+            # Vibrato: global LFO active and this channel has FMS sensitivity
+            if p.lfo_en and p.fms > 0:
+                modes.setdefault("● VIB", []).append(rng)
+            # Tremolo: global LFO active, AMS sensitivity, and ≥1 op has AM enabled
+            if p.lfo_en and p.ams > 0 and any(p.am_en):
+                modes.setdefault("● TRE", []).append(rng)
+            # SSG-EG: any operator has envelope-generator SSG mode enabled (bit 3)
+            if any(x & 0x08 for x in p.ssg_eg):
+                modes.setdefault("● SSG", []).append(rng)
+            # Stereo pan hard left or hard right (not centre / both)
+            if p.pan == 1:
+                modes.setdefault("● L", []).append(rng)
+            elif p.pan == 2:
+                modes.setdefault("● R", []).append(rng)
+
+    # PSG tone channels (CH_PSG_0–CH_PSG_2): software vibrato via pitch_envelope.
+    # A note whose pitch_envelope oscillates (direction changes) is vibrato;
+    # a monotonic run is a glide/portamento — only badge the oscillating case.
+    _PSG_TONE_IDS = (CH_PSG_0, CH_PSG_1, CH_PSG_2)
+    for n in notes:
+        if n.channel in _PSG_TONE_IDS and len(n.pitch_envelope) >= 4:
+            pitches = [p for _, p in n.pitch_envelope]
+            diffs = [pitches[i + 1] - pitches[i] for i in range(len(pitches) - 1)]
+            if any(d > 0 for d in diffs) and any(d < 0 for d in diffs):
+                modes = per_ch_modes.setdefault(n.channel, {})
+                modes.setdefault("● VIB", []).append((n.sample_on, n.sample_off))
+
+    # PSG noise channel: periodic noise and CH2-linked frequency modes.
+    # Default is white noise (bit 2 = 1) at a fixed rate — badge the non-defaults.
+    for n in notes:
+        if n.channel == CH_PSG_NOISE and n.noise_mode is not None:
+            modes = per_ch_modes.setdefault(n.channel, {})
+            rng = (n.sample_on, n.sample_off)
+            if not (n.noise_mode & 0x04):          # bit 2 = 0 → periodic (tonal buzz)
+                modes.setdefault("● PERIO", []).append(rng)
+            if (n.noise_mode & 0x03) == 3:          # bits 1:0 = 11 → pitch tracks CH2
+                modes.setdefault("● CH2", []).append(rng)
+    for ch_modes in per_ch_modes.values():
+        for mode_ranges in ch_modes.values():
+            mode_ranges.sort(key=lambda r: r[0])
+
+    return active_ids, dac_ranges, ch3_special_ranges, per_ch_modes
 
 
 def _make_is_active(ranges: list[tuple[int, int]]):
@@ -354,18 +410,26 @@ def _make_is_active(ranges: list[tuple[int, int]]):
     return check
 
 
-def _dynamic_title(ch: Channel, vgm_pos: int, dac_is_active, ch3_special_is_active) -> str:
+def _dynamic_title(
+    ch: Channel, vgm_pos: int, dac_is_active, ch3_special_is_active,
+    channel_modes: dict | None = None,
+) -> str:
     """Return the live subplot title for a channel at a given VGM sample position."""
+    parts = [ch.name]
     if ch.ch_id == 5 and dac_is_active(vgm_pos):        # FM6 silenced by DAC
-        return f"{ch.name}  ● DAC"
+        parts.append("● DAC")
     if ch.ch_id == 2 and ch3_special_is_active(vgm_pos):  # FM3 special mode
-        return f"{ch.name}  ● SPECIAL"
-    return ch.name
+        parts.append("● SPECIAL")
+    if channel_modes and ch.ch_id in channel_modes:
+        for mode_name, is_active_fn in channel_modes[ch.ch_id].items():
+            if is_active_fn(vgm_pos):
+                parts.append(mode_name)
+    return "  ".join(parts)
 
 
 # keep backward-compat alias
 def detect_active_ch_ids(vgm_path: Path) -> set[int]:
-    active_ids, _, _ = build_vgm_info(vgm_path)
+    active_ids, _, _, _ = build_vgm_info(vgm_path)
     return active_ids
 
 
@@ -507,6 +571,7 @@ def show_preview(
     dac_is_active=None,
     ch3_special_is_active=None,
     autoscale: bool = True,
+    channel_modes: dict | None = None,
 ):
     """Show a static matplotlib oscilloscope figure."""
     import matplotlib
@@ -544,7 +609,8 @@ def show_preview(
             spine.set_color("#222222")
         if autoscale:
             ax.set_yticks([])
-        ax.set_title(_dynamic_title(ch, vgm_pos, dac_is_active, ch3_special_is_active),
+        ax.set_title(_dynamic_title(ch, vgm_pos, dac_is_active, ch3_special_is_active,
+                                      channel_modes=channel_modes),
                      color=ch.color, fontsize=9, pad=3)
         ax.set_ylim(-1.1, 1.1)
         ax.axhline(0, color="#222222", linewidth=0.5)
@@ -574,6 +640,7 @@ def play_live(
     dac_is_active=None,
     ch3_special_is_active=None,
     autoscale: bool = True,
+    channel_modes: dict | None = None,
 ):
     """Play audio with real-time oscilloscope using pygame + matplotlib."""
     try:
@@ -660,7 +727,8 @@ def play_live(
                         ln.axes.set_xlim(0, t_ch[-1])
 
             for tt, ch in zip(title_texts, channels):
-                new_title = _dynamic_title(ch, vgm_pos, dac_is_active, ch3_special_is_active)
+                new_title = _dynamic_title(ch, vgm_pos, dac_is_active, ch3_special_is_active,
+                                           channel_modes=channel_modes)
                 if tt.get_text() != new_title:
                     tt.set_text(new_title)
 
@@ -692,6 +760,7 @@ def export_mp4(
     dac_is_active=None,
     ch3_special_is_active=None,
     autoscale: bool = True,
+    channel_modes: dict | None = None,
 ):
     """Export oscilloscope video to MP4 using ffmpeg."""
     import matplotlib
@@ -803,7 +872,8 @@ def export_mp4(
                         ln.axes.set_xlim(0, t_ch[-1])
 
             for tt, ch in zip(title_texts, channels):
-                new_title = _dynamic_title(ch, vgm_pos, dac_is_active, ch3_special_is_active)
+                new_title = _dynamic_title(ch, vgm_pos, dac_is_active, ch3_special_is_active,
+                                           channel_modes=channel_modes)
                 if tt.get_text() != new_title:
                     tt.set_text(new_title)
 
@@ -910,17 +980,24 @@ def main():
     # ── Step 1: detect active channels + build state timelines ─────────────
     print("Detecting active channels …")
     if not args.all_channels:
-        active_ids, dac_ranges, ch3_special_ranges = build_vgm_info(vgm_path)
+        active_ids, dac_ranges, ch3_special_ranges, per_ch_modes = build_vgm_info(vgm_path)
     else:
         active_ids = set(range(11))
-        _, dac_ranges, ch3_special_ranges = build_vgm_info(vgm_path)
+        _, dac_ranges, ch3_special_ranges, per_ch_modes = build_vgm_info(vgm_path)
     dac_is_active = _make_is_active(dac_ranges)
     ch3_special_is_active = _make_is_active(ch3_special_ranges)
+    channel_modes = {
+        ch_id: {mode: _make_is_active(ranges) for mode, ranges in modes.items()}
+        for ch_id, modes in per_ch_modes.items()
+    }
     print(f"  Active channel IDs: {sorted(active_ids)}")
     if dac_ranges:
         print(f"  DAC active: {len(dac_ranges)} note(s) — will badge FM6 live")
     if ch3_special_ranges:
         print(f"  CH3 special mode: {len(ch3_special_ranges)} note(s) — will badge FM3 live")
+    if per_ch_modes:
+        all_mode_labels = sorted({m for modes in per_ch_modes.values() for m in modes})
+        print(f"  Extra mode badges on {len(per_ch_modes)} FM channel(s): {' '.join(all_mode_labels)}")
 
     all_ch = _make_channel_table()
     target_channels = [ch for ch in all_ch if ch.ch_id in active_ids]
@@ -981,6 +1058,7 @@ def main():
                    window_s=args.window,
                    dac_is_active=dac_is_active,
                    ch3_special_is_active=ch3_special_is_active,
+                   channel_modes=channel_modes,
                    autoscale=not args.no_autoscale)
 
     elif args.play:
@@ -988,6 +1066,7 @@ def main():
         play_live(rendered, mix_wav, sample_rate, window_s=args.window,
                   dac_is_active=dac_is_active,
                   ch3_special_is_active=ch3_special_is_active,
+                  channel_modes=channel_modes,
                   autoscale=not args.no_autoscale)
 
     else:
@@ -998,6 +1077,7 @@ def main():
                      title=vgm_path.stem,
                      dac_is_active=dac_is_active,
                      ch3_special_is_active=ch3_special_is_active,
+                     channel_modes=channel_modes,
                      autoscale=not args.no_autoscale)
 
 

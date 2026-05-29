@@ -106,6 +106,23 @@ CHIP_H     = 15     # px — opaque title chip at top of each box
 
 APP_NAME   = "VgmLLM"
 
+# Ordered list of (channel_modes key, short display label) for the LCD slot row.
+# Slots are rendered right-to-left from the right edge in this order, so the
+# rightmost slot in the list ends up closest to the right edge.
+# DAC and SPC are handled separately (not in channel_modes).
+_OSC_MODE_SLOTS: tuple[tuple[str, str], ...] = (
+    ("● L",     "L"),
+    ("● R",     "R"),
+    ("● VIB",   "VIB"),
+    ("● TRE",   "TRE"),
+    ("● SSG",   "SSG"),
+    ("● PERIO", "PERIO"),
+    ("● CH2",   "CH2"),
+)
+
+# Colour for an unlit LCD segment (dark, barely-there ghost).
+_LCD_DIM = (42, 42, 60)
+
 
 def _osc_cols(n_channels: int) -> int:
     """Dynamic column count: ≤4 → 2 cols, 5-9 → 3 cols, 10+ → 4 cols."""
@@ -302,6 +319,7 @@ def _draw_osc_grid(
     font_sm,
     music_started:        bool = True,
     box_h:                int  = OSC_BOX_H,
+    channel_modes:        dict | None = None,
 ) -> None:
     """Overlay a grid of compact oscilloscope boxes on the surface."""
     import pygame
@@ -366,16 +384,41 @@ def _draw_osc_grid(
         pygame.draw.rect(box, (20, 20, 30, 230),
                          pygame.Rect(1, 1, inner_w - 2, CHIP_H), border_radius=3)
 
-        label = _dynamic_title(ch, vgm_pos, dac_is_active, ch3_special_is_active)
         if font_sm:
-            # left: window width in ms (muted grey)
-            ms_str  = f"{win_n / sample_rate * 1000:.0f}ms"
-            ms_surf = font_sm.render(ms_str, True, (90, 90, 120))
-            box.blit(ms_surf, (OSC_PAD, 2))
-            # right: channel name in channel colour
             r, g, b = _hex_to_rgb(ch.color)
-            txt = font_sm.render(label, True, (r, g, b))
-            box.blit(txt, (inner_w - txt.get_width() - OSC_PAD, 2))
+            ms_str = f"{win_n / sample_rate * 1000:.0f}ms"
+
+            # ── LEFT: "FM3 · 8ms" in channel colour ───────────────────────────
+            name_ms_surf = font_sm.render(f"{ch.name} · {ms_str}", True, (r, g, b))
+            box.blit(name_ms_surf, (OSC_PAD, 2))
+
+            # ── RIGHT: LCD segment row — every slot always present, dim or lit ─
+            # Slots are laid out right-to-left so each label is at a fixed pixel
+            # column every frame (Game & Watch / calculator display effect).
+            SLOT_GAP = 5
+            ch_modes = (channel_modes or {}).get(ch.ch_id, {})
+
+            # Build slot list in right-to-left render order:
+            #   last item rendered → rightmost on screen
+            slots: list[tuple[str, bool]] = []
+            # DAC / SPC come first in the list → rendered leftmost in the right block
+            if ch.ch_id == 5:  # FM6
+                slots.append(("DAC", dac_is_active(vgm_pos)))
+            if ch.ch_id == 2:  # FM3
+                slots.append(("SPC", ch3_special_is_active(vgm_pos)))
+            for key, short in _OSC_MODE_SLOTS:
+                if key in ch_modes:
+                    slots.append((short, ch_modes[key](vgm_pos)))
+
+            # Render right-to-left: iterate in reverse so rightmost slot lands
+            # closest to the right edge.
+            rx = inner_w - OSC_PAD
+            for label_txt, active in reversed(slots):
+                col  = (r, g, b) if active else _LCD_DIM
+                surf = font_sm.render(label_txt, True, col)
+                rx  -= surf.get_width()
+                box.blit(surf, (rx, 2))
+                rx  -= SLOT_GAP
 
         surface.blit(box, (bx + 1, by + 1))
 
@@ -436,6 +479,7 @@ def _render_combined(
     title, n_channels, total_sec, composer,
     font_hdr, font_mono, font_sm, font_key,
     no_osc: bool = False,
+    channel_modes: dict | None = None,
 ) -> None:
     """Composite one complete frame onto `surface`."""
     top_y = HEADER_H  # the falling zone starts here
@@ -462,6 +506,7 @@ def _render_combined(
             dac_is_active, ch3_special_is_active, font_sm,
             music_started=(t >= 0),
             box_h=box_h,
+            channel_modes=channel_modes,
         )
 
     # 3 – header on top of everything
@@ -471,11 +516,7 @@ def _render_combined(
 # ── setup / WAV rendering ──────────────────────────────────────────────────────
 
 def _build_looped_wav(src: Path, t_loop_start: float, extra_sec: float, out: Path) -> None:
-    """Append the first `extra_sec` seconds of the loop body to `src`, writing `out`.
-
-    Works at raw-bytes level (no re-encode, preserves original sample format).
-    Used to give the MP4 export gapless audio through the phantom-note tail.
-    """
+    """Append the first `extra_sec` seconds of the loop body to `src`, writing `out`."""
     import wave as _wave
     with _wave.open(str(src), "rb") as wf:
         sr      = wf.getframerate()
@@ -537,9 +578,13 @@ def _prepare(args, vgm_path: Path):
         print(f"  Warning: {e} — running without audio / per-channel WAVs")
         renderer = None
 
-    active_ids, dac_ranges, ch3_ranges = build_vgm_info(vgm_path)
+    active_ids, dac_ranges, ch3_ranges, per_ch_modes = build_vgm_info(vgm_path)
     dac_is_active         = _make_is_active(dac_ranges)
     ch3_special_is_active = _make_is_active(ch3_ranges)
+    channel_modes = {
+        ch_id: {mode: _make_is_active(ranges) for mode, ranges in modes.items()}
+        for ch_id, modes in per_ch_modes.items()
+    }
 
     channels: list[Channel] = []
     if renderer is not None:
@@ -616,6 +661,7 @@ def _prepare(args, vgm_path: Path):
         dac_is_active, ch3_special_is_active,
         composer, track_title,
         font_hdr, font_mono, font_sm, font_key,
+        channel_modes,
     )
 
 
@@ -630,6 +676,7 @@ def _interactive(
     dac_is_active, ch3_special_is_active,
     composer, track_title,
     font_hdr, font_mono, font_sm, font_key,
+    channel_modes=None,
 ):
     import pygame
 
@@ -726,6 +773,7 @@ def _interactive(
             window_s, autoscale, _osc_cols(len(channels)), title, len(channels), total_sec, composer,
             font_hdr, font_mono, font_sm, font_key,
             no_osc=args.no_osc,
+            channel_modes=channel_modes,
         )
 
         pygame.display.flip()
@@ -784,6 +832,7 @@ def _export_mp4(
     dac_is_active, ch3_special_is_active,
     composer, track_title,
     font_hdr, font_mono, font_sm, font_key,
+    channel_modes=None,
 ):
     import pygame
 
@@ -844,6 +893,7 @@ def _export_mp4(
                 window_s, autoscale, _osc_cols(len(channels)), title, len(channels), total_sec, composer,
                 font_hdr, font_mono, font_sm, font_key,
                 no_osc=args.no_osc,
+                channel_modes=channel_modes,
             )
 
             raw = pygame.surfarray.array3d(surface)
@@ -910,6 +960,7 @@ def main() -> None:
         dac_is_active, ch3_special_is_active,
         composer, track_title,
         font_hdr, font_mono, font_sm, font_key,
+        channel_modes,
     ) = _prepare(args, vgm_path)
 
     if args.mp4:
@@ -922,6 +973,7 @@ def main() -> None:
             dac_is_active, ch3_special_is_active,
             composer, track_title,
             font_hdr, font_mono, font_sm, font_key,
+            channel_modes=channel_modes,
         )
     else:
         _interactive(
@@ -933,6 +985,7 @@ def main() -> None:
             dac_is_active, ch3_special_is_active,
             composer, track_title,
             font_hdr, font_mono, font_sm, font_key,
+            channel_modes=channel_modes,
         )
 
 
