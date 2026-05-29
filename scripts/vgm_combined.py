@@ -191,6 +191,7 @@ def _draw_background(
     particles: list | None = None,  # mutable spark list (updated in-place)
     dt:          float        = 0.0,  # seconds since last frame (for particles)
     bpm:         float        = 0.0,  # detected tempo for bar/beat grid lines
+    beats_per_bar: int        = 4,    # time signature numerator
 ) -> None:
     """Draw the synthesia background: fill, falling note bars, and piano keyboard."""
     import pygame
@@ -216,7 +217,7 @@ def _draw_background(
     if bpm > 0.0:
         import math as _math
         beat_sec = 60.0 / bpm
-        bar_sec  = beat_sec * 4          # assume 4/4
+        bar_sec  = beat_sec * beats_per_bar
         # which beat index is the first one visible?
         first_beat = int(_math.floor(t_vis_start / beat_sec))
         beat_idx   = first_beat
@@ -239,7 +240,14 @@ def _draw_background(
             beat_idx += 1
 
     # ── falling note bars ──────────────────────────────────────────────────────
-    # Pre-group pitched notes by pitch to detect multi-channel overlap (Idea 1).
+    # _pitch_all: full-timeline grouping so same_time is stable throughout each
+    # note's fall (not recomputed per-frame as notes enter/exit the view window).
+    _pitch_all: dict[int, list] = {}
+    for nr in rects:
+        if nr.pitch >= 0 and nr.channel != CH_DAC:
+            _pitch_all.setdefault(nr.pitch, []).append(nr)
+
+    # _pitch_groups: only notes in the current view window, for the visibility loop.
     _pitch_groups: dict[int, list] = {}
     for nr in rects:
         if nr.t_off < t_vis_start or nr.t_on > t_vis_end:
@@ -265,9 +273,11 @@ def _draw_background(
             bx = piano_x0 + rel_x
             bw = max(key_w - 2, 2)
 
-            # Find every visible note at this pitch that overlaps this one in time.
+            # Find every note at this pitch that temporally overlaps this one.
+            # Use _pitch_all (full timeline) so the group composition — and thus
+            # the gradient — is stable for the entire fall of each note.
             same_time = [
-                o for o in _pitch_groups[nr.pitch]
+                o for o in _pitch_all.get(nr.pitch, [])
                 if o.t_on < nr.t_off and o.t_off > nr.t_on
             ]
             N   = len(same_time)
@@ -714,6 +724,7 @@ def _render_combined(
     particles: list | None = None,
     dt: float = 0.0,
     bpm: float = 0.0,
+    beats_per_bar: int = 4,
 ) -> None:
     """Composite one complete frame onto `surface`."""
     top_y = HEADER_H  # the falling zone starts here
@@ -724,7 +735,7 @@ def _render_combined(
         screen_w, screen_h, piano_h, top_y,
         dac_strip_w, pitch_min, pitch_max,
         white_w, black_w, min_white, piano_x0, font_key,
-        particles=particles, dt=dt, bpm=bpm,
+        particles=particles, dt=dt, bpm=bpm, beats_per_bar=beats_per_bar,
     )
 
     # 2 – oscilloscope grid overlay (behind header, in front of falling notes)
@@ -783,8 +794,11 @@ def _prepare(args, vgm_path: Path):
     """
     # ── 1. Parse notes (no pygame needed) ─────────────────────────────────────
     print(f"Loading {vgm_path.name} …")
-    rects, total_sec, t_loop_start, bpm = _parse_notes(vgm_path)
-    print(f"  {len(rects)} note events, {total_sec:.1f}s  loop@{t_loop_start:.1f}s  ~{bpm:.1f} BPM")
+    rects, total_sec, t_loop_start, bpm, beats_per_bar = _parse_notes(vgm_path)
+    print(f"  {len(rects)} note events, {total_sec:.1f}s  loop@{t_loop_start:.1f}s  ~{bpm:.1f} BPM ({beats_per_bar}/4)")
+    if getattr(args, 'bpm', None) is not None:
+        bpm = float(args.bpm)
+        print(f"  BPM override: {bpm:.2f}")
 
     pitched = [r for r in rects if r.pitch >= 0 and r.channel != CH_DAC]
     if not pitched:
@@ -889,7 +903,7 @@ def _prepare(args, vgm_path: Path):
     font_key  = pygame.font.SysFont("monospace", 10)
 
     return (
-        rects, total_sec, t_loop_start, bpm,
+        rects, total_sec, t_loop_start, bpm, beats_per_bar,
         pitch_min, pitch_max, min_white, n_whites,
         white_w, black_w, piano_x0, DAC_STRIP_W,
         channels, mix_wav, mix_looped_wav, sample_rate,
@@ -904,7 +918,7 @@ def _prepare(args, vgm_path: Path):
 
 def _interactive(
     args, vgm_path,
-    rects, total_sec, t_loop_start, bpm,
+    rects, total_sec, t_loop_start, bpm, beats_per_bar,
     pitch_min, pitch_max, min_white, n_whites,
     white_w, black_w, piano_x0, dac_strip_w,
     channels, mix_wav, mix_looped_wav, sample_rate,
@@ -1015,6 +1029,7 @@ def _interactive(
             particles=particles,
             dt=spf,
             bpm=bpm,
+            beats_per_bar=beats_per_bar,
         )
 
         pygame.display.flip()
@@ -1066,7 +1081,7 @@ def _video_enc_args(args, ffmpeg_bin: str) -> list[str]:
 
 def _export_mp4(
     args, vgm_path,
-    rects, total_sec, t_loop_start, bpm,
+    rects, total_sec, t_loop_start, bpm, beats_per_bar,
     pitch_min, pitch_max, min_white, n_whites,
     white_w, black_w, piano_x0, dac_strip_w,
     channels, mix_wav, mix_looped_wav, sample_rate,
@@ -1140,6 +1155,7 @@ def _export_mp4(
                 particles=particles,
                 dt=spf,
                 bpm=bpm,
+                beats_per_bar=beats_per_bar,
             )
 
             raw = pygame.surfarray.array3d(surface)
@@ -1189,6 +1205,8 @@ def main() -> None:
     parser.add_argument("--amf",          action="store_true",
                         help="Use AMD AMF hardware encoder (h264_amf) on the APU; "
                              "auto-falls back to libx264 if unavailable")
+    parser.add_argument("--bpm", type=float, default=None,
+                        help="Override auto-detected BPM for bar/beat grid lines")
     parser.add_argument("--vgmplay-dir",  type=Path, default=_DEFAULT_VGMPLAY_DIR,
                         dest="vgmplay_dir",
                         help=f"VGMPlay directory (default: {_DEFAULT_VGMPLAY_DIR})")
@@ -1199,7 +1217,7 @@ def main() -> None:
         sys.exit(f"File not found: {vgm_path}")
 
     (
-        rects, total_sec, t_loop_start, bpm,
+        rects, total_sec, t_loop_start, bpm, beats_per_bar,
         pitch_min, pitch_max, min_white, n_whites,
         white_w, black_w, piano_x0, dac_strip_w,
         channels, mix_wav, mix_looped_wav, sample_rate,
@@ -1212,7 +1230,7 @@ def main() -> None:
     if args.mp4:
         _export_mp4(
             args, vgm_path,
-            rects, total_sec, t_loop_start, bpm,
+            rects, total_sec, t_loop_start, bpm, beats_per_bar,
             pitch_min, pitch_max, min_white, n_whites,
             white_w, black_w, piano_x0, dac_strip_w,
             channels, mix_wav, mix_looped_wav, sample_rate,
@@ -1224,7 +1242,7 @@ def main() -> None:
     else:
         _interactive(
             args, vgm_path,
-            rects, total_sec, t_loop_start, bpm,
+            rects, total_sec, t_loop_start, bpm, beats_per_bar,
             pitch_min, pitch_max, min_white, n_whites,
             white_w, black_w, piano_x0, dac_strip_w,
             channels, mix_wav, mix_looped_wav, sample_rate,

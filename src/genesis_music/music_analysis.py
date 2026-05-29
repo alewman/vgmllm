@@ -128,9 +128,18 @@ def detect_tempo(
     if search.max() == 0:
         return 120.0
 
-    beat_lag_bins = min_lag + int(search.argmax())
-    beat_samples  = beat_lag_bins * bin_size
-    bpm           = 60.0 * SAMPLE_RATE / beat_samples
+    peak_rel = int(search.argmax())
+
+    # Parabolic interpolation for sub-bin accuracy (reduces drift on long songs)
+    beat_lag_bins_f = float(min_lag + peak_rel)
+    if 0 < peak_rel < len(search) - 1:
+        a, b, c = float(search[peak_rel - 1]), float(search[peak_rel]), float(search[peak_rel + 1])
+        denom = a - 2.0 * b + c
+        if denom != 0.0:
+            beat_lag_bins_f = min_lag + peak_rel + 0.5 * (a - c) / denom
+
+    beat_samples = beat_lag_bins_f * bin_size
+    bpm          = 60.0 * SAMPLE_RATE / beat_samples
 
     # Clamp to plausible range
     return float(np.clip(bpm, bpm_min, bpm_max))

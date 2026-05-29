@@ -37,7 +37,7 @@ _HERE = Path(__file__).resolve().parent
 _ROOT = _HERE.parent
 sys.path.insert(0, str(_ROOT / "src"))
 
-from genesis_music.music_analysis import detect_tempo
+from genesis_music.music_analysis import detect_meter, detect_tempo
 from genesis_music.vgm_parser import load_vgm
 from genesis_music.ym2612 import (
     CH_DAC, CH_FM_0, CH_PSG_0, CH_PSG_1, CH_PSG_2, CH_PSG_NOISE,
@@ -198,11 +198,13 @@ class _MixRenderer:
         return None
 
 
-def _parse_notes(vgm_path: Path) -> tuple[list[NoteRect], float, float, float]:
+def _parse_notes(vgm_path: Path) -> tuple[list[NoteRect], float, float, float, int]:
     vgm   = load_vgm(vgm_path)
     notes, _ = decode_vgm(vgm)
     total_sec = vgm.header.total_samples / VGM_RATE
     bpm = detect_tempo(notes, vgm.header.total_samples)
+    beat_period_samples = VGM_RATE * 60.0 / bpm
+    beats_per_bar, _ = detect_meter(notes, vgm.header.total_samples, beat_period_samples)
 
     # VGM loop point: jump-back target for seamless looping
     h = vgm.header
@@ -220,7 +222,7 @@ def _parse_notes(vgm_path: Path) -> tuple[list[NoteRect], float, float, float]:
         color = CHANNEL_COLORS.get(n.channel, (200, 200, 200))
         rects.append(NoteRect(n.channel, n.pitch, t_on, t_off, color, n.velocity))
 
-    return rects, total_sec, t_loop_start, bpm
+    return rects, total_sec, t_loop_start, bpm, beats_per_bar
 
 
 def _render_frame(
