@@ -200,6 +200,15 @@ def detect_beat_phase(
         k = math.ceil((best_phase - first_onset_sec) / beat_sec)
         best_phase -= k * beat_sec
 
+    # If the phase landed just before the first onset by less than ⅛ beat,
+    # it is almost certainly a comb-filter quantisation artefact (10 ms bin
+    # resolution) rather than a deliberate anacrusis.  Snap the bar forward
+    # so it aligns visually with the first note.  Larger gaps (≥ ⅛ beat) are
+    # left alone so real pick-up bars are preserved.
+    gap = first_onset_sec - best_phase
+    if 0 < gap < beat_sec / 8:
+        best_phase = first_onset_sec
+
     return max(0.0, best_phase)
 
 

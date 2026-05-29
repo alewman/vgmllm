@@ -581,6 +581,7 @@ def _draw_osc_grid(
     music_started:        bool = True,
     box_h:                int  = OSC_BOX_H,
     channel_modes:        dict | None = None,
+    muted_channels:       set | None  = None,
 ) -> None:
     """Overlay a grid of compact oscilloscope boxes on the surface."""
     import pygame
@@ -616,8 +617,13 @@ def _draw_osc_grid(
                          (OSC_PAD, cy), (inner_w - OSC_PAD, cy), 1)
 
         # ── oscilloscope trace ─────────────────────────────────────────────────
+        _muted = muted_channels is not None and idx in muted_channels
         win_n = default_win   # default, may be updated below
-        if music_started and ch.audio is not None and len(ch.audio) > 0:
+        if _muted:
+            # Muted: dim background, draw flat centre line only
+            pygame.draw.rect(box, (5, 5, 10, 180),
+                             pygame.Rect(0, 0, inner_w, inner_h), border_radius=4)
+        elif music_started and ch.audio is not None and len(ch.audio) > 0:
             if autoscale:
                 win_n = adaptive_window_samples(
                     ch.audio, pos_sample, sample_rate, default_samples=default_win)
@@ -641,6 +647,13 @@ def _draw_osc_grid(
                 r, g, b = _hex_to_rgb(ch.color)
                 pygame.draw.aalines(box, (r, g, b, 255), False, pts)
 
+        # ── muted badge overlay ────────────────────────────────────────────────
+        if _muted and font_sm:
+            badge = font_sm.render("MUTED", True, (220, 60, 60))
+            bx_off = (inner_w - badge.get_width()) // 2
+            by_off = trace_y0 + (trace_h - badge.get_height()) // 2
+            box.blit(badge, (bx_off, by_off))
+
         # ── title chip (opaque dark strip over trace) ──────────────────────────
         pygame.draw.rect(box, (20, 20, 30, 230),
                          pygame.Rect(1, 1, inner_w - 2, CHIP_H), border_radius=3)
@@ -649,8 +662,9 @@ def _draw_osc_grid(
             r, g, b = _hex_to_rgb(ch.color)
             ms_str = f"{win_n / sample_rate * 1000:.0f}ms"
 
-            # ── LEFT: "FM3 · 8ms" in channel colour ───────────────────────────
-            name_ms_surf = font_sm.render(f"{ch.name} · {ms_str}", True, (r, g, b))
+            # ── LEFT: "FM3 · 8ms" in channel colour (dim when muted) ──────────
+            name_col = (70, 70, 80) if _muted else (r, g, b)
+            name_ms_surf = font_sm.render(f"{ch.name} · {ms_str}", True, name_col)
             box.blit(name_ms_surf, (OSC_PAD, 2))
 
             # ── RIGHT: LCD segment row — every slot always present, dim or lit ─
@@ -712,15 +726,14 @@ def _draw_header(
 
     if font_hdr:
         t_mins, t_secs = divmod(total_sec, 60)
-        meta  = f"{n_channels}ch  ·  {int(t_mins)}:{int(t_secs):02d}"
         by    = f"  ·  {composer}" if composer else ""
-        label = f"VgmLLM  ·  Synthesia + Oscilloscope  ·  {title}{by}  ·  {meta}"
+        label = f"Mega Drive  ·  {title}{by}  ·  {n_channels}ch  ·  {int(t_mins)}:{int(t_secs):02d}  ·  Synthesia + Oscilloscope"
         txt   = font_hdr.render(label, True, (190, 190, 215))
         surface.blit(txt, (bar_rect.x + 10, vy - txt.get_height() // 2))
 
     if font_mono:
         mins, secs = divmod(max(t, 0.0), 60)
-        ts_str  = f"Aubrey Lewman  ·  {int(mins)}:{secs:06.3f}"
+        ts_str  = f"VgmLLM  ·  Aubrey Lewman  ·  {int(mins)}:{secs:06.3f}"
         ts_surf = font_mono.render(ts_str, True, (140, 140, 165))
         tx = bar_rect.right - ts_surf.get_width() - 10
         surface.blit(ts_surf, (tx, vy - ts_surf.get_height() // 2))
@@ -741,6 +754,7 @@ def _render_combined(
     font_hdr, font_mono, font_sm, font_key,
     no_osc: bool = False,
     channel_modes: dict | None = None,
+    muted_channels: set | None = None,
     particles: list | None = None,
     dt: float = 0.0,
     tempo_map: list | None = None,
@@ -774,6 +788,7 @@ def _render_combined(
             music_started=(t >= 0),
             box_h=box_h,
             channel_modes=channel_modes,
+            muted_channels=muted_channels,
         )
 
     # 3 – header on top of everything
@@ -927,7 +942,7 @@ def _prepare(args, vgm_path: Path):
     font_key  = pygame.font.SysFont("monospace", 10)
 
     return (
-        rects, total_sec, t_loop_start, bpm, beats_per_bar, beat_phase,
+        rects, total_sec, t_loop_start, tempo_map, beats_per_bar,
         pitch_min, pitch_max, min_white, n_whites,
         white_w, black_w, piano_x0, DAC_STRIP_W,
         channels, mix_wav, mix_looped_wav, sample_rate,
@@ -961,6 +976,9 @@ def _interactive(
     if has_audio:
         pygame.mixer.init(frequency=sample_rate, size=-16, channels=2, buffer=2048)
         pygame.mixer.music.load(str(mix_wav))
+    # SDL typically double-buffers, so actual output lags by ~2 buffer lengths.
+    # Subtracting this from _audio_seek_base keeps visuals aligned with speakers.
+    _audio_lat: float = 2 * 2048 / sample_rate if has_audio else 0.0
 
     window_s  = args.window
     autoscale = not args.no_autoscale
@@ -972,11 +990,21 @@ def _interactive(
 
     has_loop = t_loop_start > 0.0
 
+    # get_pos() returns ms *since the last play() call*, not the file position.
+    # We track the file offset at which we last called play() so that
+    #   t = _audio_seek_base + get_pos() / 1000
+    # always gives the correct absolute position in the file.
+    _audio_seek_base = 0.0
+    _last_play_t0: float = 0.0   # monotonic time of the most recent play() call
+
     def _start_audio_at(pos_sec: float) -> None:
+        nonlocal _audio_seek_base, _last_play_t0
         if not has_audio:
             return
         pygame.mixer.music.stop()
         if pos_sec >= 0:
+            _audio_seek_base = pos_sec - _audio_lat
+            _last_play_t0 = _time.monotonic()
             pygame.mixer.music.play(start=pos_sec)
 
     _start_audio_at(t)
@@ -988,6 +1016,91 @@ def _interactive(
 
     particles: list = []   # spark particles for Idea 3
     spf = 1.0 / args.fps
+
+    # ── per-channel mute state ─────────────────────────────────────────────────
+    muted_channels: set[int] = set()
+    _note_text: str   = ""
+    _note_timer: float = 0.0
+    _mix_buf: object   = None  # keeps in-memory WAV BytesIO alive while pygame streams it
+
+    def _osc_hit(mx: int, my: int) -> int | None:
+        """Return channel index if (mx,my) is inside an oscilloscope box, else None."""
+        if args.no_osc or not channels:
+            return None
+        cols = _osc_cols(len(channels))
+        gx   = dac_strip_w + OSC_MARGIN
+        gy   = HEADER_H + OSC_MARGIN
+        gw   = args.width - gx - OSC_MARGIN
+        n_rows = math.ceil(len(channels) / cols)
+        bh   = _osc_box_h(n_rows)
+        cw   = gw // cols
+        for idx in range(len(channels)):
+            bx = gx + (idx % cols) * cw + 1
+            by = gy + (idx // cols) * bh + 1
+            if bx <= mx < bx + cw - 2 and by <= my < by + bh - 2:
+                return idx
+        return None
+
+    def _rebuild_mix() -> None:
+        """Rebuild the playback mix from non-muted channel audio arrays."""
+        nonlocal _audio_seek_base, _last_play_t0, _mix_buf
+        if not has_audio:
+            return
+        seek = max(t, 0.0)
+        pygame.mixer.music.stop()
+        if not muted_channels:
+            # All channels live — use original mix (best quality)
+            _mix_buf = None
+            pygame.mixer.music.load(str(mix_wav))
+            _audio_seek_base = seek - _audio_lat
+            _last_play_t0 = _time.monotonic()
+            if not paused:
+                pygame.mixer.music.play(start=seek)
+            return
+        # Sum non-muted channel audio arrays.
+        # Extend each array with its loop body so the temp WAV covers the same
+        # duration as mix_wav — prevents audio ending early and causing t to
+        # drift past t_end and jump to t_loop_start.
+        loop_start_fr = int(t_loop_start * sample_rate)
+        active = []
+        for i, ch in enumerate(channels):
+            if i in muted_channels or ch.audio is None or len(ch.audio) == 0:
+                continue
+            arr = ch.audio
+            if loop_start_fr < len(arr):
+                loop_body = arr[loop_start_fr:]
+                arr = np.concatenate([arr, loop_body])
+            active.append(arr)
+        if not active:
+            # Everything muted — audio already stopped above.
+            # Re-anchor wall-clock tracking so t advances correctly via the
+            # get_pos() == -1 fallback, starting from the current position.
+            _audio_seek_base = seek
+            _last_play_t0 = _time.monotonic()
+            return
+        max_len = max(len(a) for a in active)
+        mix_arr = np.zeros(max_len, dtype=np.float32)
+        for a in active:
+            mix_arr[:len(a)] += a
+        peak = float(np.max(np.abs(mix_arr)))
+        if peak > 1.0:
+            mix_arr /= peak
+        data16 = np.clip(mix_arr * 32767, -32768, 32767).astype(np.int16)
+        stereo = np.stack([data16, data16], axis=1).tobytes()
+        import io as _io, wave as _wave
+        buf = _io.BytesIO()
+        with _wave.open(buf, "wb") as wf:
+            wf.setnchannels(2)
+            wf.setsampwidth(2)
+            wf.setframerate(sample_rate)
+            wf.writeframes(stereo)
+        buf.seek(0)
+        _mix_buf = buf  # keep BytesIO alive while pygame streams from it
+        pygame.mixer.music.load(_mix_buf, ".wav")
+        _audio_seek_base = seek - _audio_lat
+        _last_play_t0 = _time.monotonic()
+        if not paused:
+            pygame.mixer.music.play(start=seek)
 
     while True:
         for event in pygame.event.get():
@@ -1011,21 +1124,38 @@ def _interactive(
                     t = max(t - 5.0, -args.lookahead)
                     _start_audio_at(max(t, 0))
                     audio_started = t >= 0
+            elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                idx = _osc_hit(event.pos[0], event.pos[1])
+                if idx is not None:
+                    ch_name = channels[idx].name
+                    if idx in muted_channels:
+                        muted_channels.discard(idx)
+                        _note_text = f"\u266a  {ch_name}  \u2192  unmuted"
+                    else:
+                        muted_channels.add(idx)
+                        _note_text = f"\u2715  {ch_name}  \u2192  muted"
+                    _note_timer = 2.5
+                    _rebuild_mix()
 
         if not paused:
             if has_audio and audio_started:
                 pos_ms = pygame.mixer.music.get_pos()
                 if pos_ms >= 0:
-                    t = pos_ms / 1000.0
+                    t = _audio_seek_base + pos_ms / 1000.0
+                elif _last_play_t0 > 0 and (_time.monotonic() - _last_play_t0) < 0.5:
+                    # get_pos() briefly returns -1 right after play() while the
+                    # audio buffer fills.  Use wall-clock to avoid a spurious
+                    # t += dt that could push t past t_end and trigger a loop jump.
+                    t = _audio_seek_base + (_time.monotonic() - _last_play_t0)
                 else:
-                    # audio finished — advance by clock so loop condition triggers
+                    # Audio genuinely finished — advance by clock so loop triggers
                     dt = clock.tick(args.fps) / 1000.0
                     t += dt
             else:
                 dt = clock.tick(args.fps) / 1000.0
                 t += dt
                 if has_audio and not audio_started and t >= 0:
-                    pygame.mixer.music.play(start=0)
+                    _start_audio_at(0.0)
                     audio_started = True
                     t = 0.0
         else:
@@ -1034,7 +1164,13 @@ def _interactive(
         if t >= t_end:
             # Seamless loop: jump to the VGM loop point (not back to pre-roll)
             t = t_loop_start
-            _start_audio_at(t_loop_start)
+            # Skip audio restart when every channel is muted; just re-anchor the
+            # wall-clock so t keeps advancing without triggering phantom audio.
+            if has_audio and muted_channels and len(muted_channels) >= len(channels):
+                _audio_seek_base = t_loop_start
+                _last_play_t0 = _time.monotonic()
+            else:
+                _start_audio_at(t_loop_start)
             audio_started = True
 
         pos_sample = int(max(t, 0.0) * sample_rate)
@@ -1050,15 +1186,36 @@ def _interactive(
             font_hdr, font_mono, font_sm, font_key,
             no_osc=args.no_osc,
             channel_modes=channel_modes,
+            muted_channels=muted_channels,
             particles=particles,
             dt=spf,
             tempo_map=tempo_map,
             beats_per_bar=beats_per_bar,
         )
 
+        # ── mute notification toast ────────────────────────────────────────────
+        if _note_timer > 0.0 and font_hdr:
+            alpha_i   = int(min(1.0, _note_timer) * 210)
+            is_mute   = "\u2715" in _note_text
+            text_col  = (220, 90, 60) if is_mute else (70, 210, 110)
+            txt_surf  = font_hdr.render(_note_text, True, text_col)
+            pad       = 8
+            toast_w   = txt_surf.get_width() + pad * 2
+            toast_h   = txt_surf.get_height() + pad
+            toast     = pygame.Surface((toast_w, toast_h), pygame.SRCALPHA)
+            pygame.draw.rect(toast, (15, 15, 25, alpha_i),
+                             toast.get_rect(), border_radius=5)
+            toast.blit(txt_surf, (pad, pad // 2))
+            nx = (args.width - toast_w) // 2
+            ny = HEADER_H + 6
+            screen.blit(toast, (nx, ny))
+            _note_timer -= spf
+
         pygame.display.flip()
         if not (has_audio and audio_started and not paused):
             clock.tick(args.fps)
+
+    _mix_buf = None  # allow GC of in-memory WAV BytesIO buffer
 
 
 # ── MP4 encoder helpers ──────────────────────────────────────────────────────────────────────────────
@@ -1150,15 +1307,21 @@ def _export_mp4(
         ffmpeg_cmd += ["-itsoffset", f"{args.lookahead / 2:.6f}", "-i", str(audio_wav)]
     ffmpeg_cmd += _video_enc_args(args, ffmpeg)
     if has_mix:
-        ffmpeg_cmd += ["-acodec", "aac", "-b:a", "192k", "-shortest"]
+        ffmpeg_cmd += ["-acodec", "aac", "-b:a", "192k"]
+    # Explicit duration limit — more reliable than -shortest with -itsoffset.
+    # Total output = pre-roll + full first playthrough + one extra loop pass + tail.
+    out_duration = total_frames / args.fps
+    ffmpeg_cmd += ["-t", f"{out_duration:.6f}"]
     ffmpeg_cmd.append(str(out_path))
 
     proc = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE,
-                            stderr=subprocess.DEVNULL)
+                            stderr=None)   # show ffmpeg output so errors are visible
     t0 = _time.time()
-    print(f"Exporting {total_frames} frames @ {args.fps}fps → {out_path}")
+    print(f"Exporting {total_frames} frames @ {args.fps}fps "
+          f"({out_duration:.1f}s) → {out_path}")
 
     particles: list = []   # spark particles for Idea 3
+    _render_exc: BaseException | None = None
 
     try:
         for frame_i in range(total_frames):
@@ -1183,7 +1346,12 @@ def _export_mp4(
             )
 
             raw = pygame.surfarray.array3d(surface)
-            proc.stdin.write(raw.transpose(1, 0, 2).tobytes())
+            try:
+                proc.stdin.write(raw.transpose(1, 0, 2).tobytes())
+            except BrokenPipeError:
+                print(f"\n  ffmpeg pipe closed at frame {frame_i} "
+                      f"(t={max(t,0):.2f}s) — ffmpeg may have crashed (see above)")
+                break
 
             if frame_i % (args.fps * 5) == 0:
                 elapsed   = _time.time() - t0
@@ -1192,9 +1360,15 @@ def _export_mp4(
                 print(f"  {pct:5.1f}%  t={max(t,0):.1f}s/{total_sec:.1f}s  "
                       f"ETA {remaining:.0f}s", end="\r", flush=True)
 
+    except Exception as exc:
+        _render_exc = exc
+        print(f"\n  Render exception at frame {frame_i}: {exc!r}")
     finally:
         proc.stdin.close()
         proc.wait()
+
+    if _render_exc is not None:
+        raise _render_exc
 
     elapsed = _time.time() - t0
     print(f"\n  Done → {out_path}  ({elapsed:.1f}s)")
