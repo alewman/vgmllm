@@ -203,6 +203,89 @@ def detect_beat_phase(
     return max(0.0, best_phase)
 
 
+# ---------------------------------------------------------------------------
+# Piecewise tempo map
+# ---------------------------------------------------------------------------
+
+def detect_tempo_map(
+    note_events: list,
+    total_samples: int,
+    change_threshold: float = 0.06,
+    min_section_sec: float  = 15.0,
+) -> list[tuple[float, float]]:
+    """Detect piecewise-constant tempo sections.
+
+    Recursively splits the song in half; when the two halves have
+    significantly different BPMs (ratio > *change_threshold*), the
+    boundary is refined via binary search.  Up to 2 levels of recursion
+    are applied, so up to 4 sections can be returned.
+
+    Returns ``[(t_start_sec, bpm), ...]`` with at least one entry (the
+    whole-song BPM when no change is detected).
+    """
+    from types import SimpleNamespace
+
+    min_sec = int(min_section_sec * SAMPLE_RATE)
+
+    def _seg(s0: int, s1: int) -> float | None:
+        """Detect tempo in sample range [s0, s1)."""
+        if s1 - s0 < min_sec:
+            return None
+        proxies = [
+            SimpleNamespace(sample_on=e.sample_on - s0, channel=e.channel)
+            for e in note_events
+            if s0 <= e.sample_on < s1 and e.channel < CH_DAC
+        ]
+        if len(proxies) < 8:
+            return None
+        return detect_tempo(proxies, s1 - s0)
+
+    def _find(s0: int, s1: int, depth: int = 0) -> list[tuple[float, float]]:
+        bpm_whole = _seg(s0, s1)
+        if bpm_whole is None:
+            return []
+
+        if s1 - s0 < min_sec * 2 or depth >= 2:
+            return [(s0 / SAMPLE_RATE, bpm_whole)]
+
+        half      = (s0 + s1) // 2
+        bpm_left  = _seg(s0,   half)
+        bpm_right = _seg(half, s1)
+
+        if bpm_left is None or bpm_right is None:
+            return [(s0 / SAMPLE_RATE, bpm_whole)]
+
+        ratio = abs(bpm_left - bpm_right) / max(bpm_left, bpm_right)
+        if ratio < change_threshold:
+            return [(s0 / SAMPLE_RATE, bpm_whole)]
+
+        # Binary-search for the exact change boundary
+        lo, hi = s0 + min_sec, s1 - min_sec
+        for _ in range(8):
+            mid = (lo + hi) // 2
+            if mid <= lo or mid >= hi:
+                break
+            bl = _seg(s0,  mid)
+            br = _seg(mid, s1)
+            if bl is None or br is None:
+                break
+            # Whichever half is still "pure" → boundary is on the other side
+            if abs(bl - bpm_left) <= abs(br - bpm_right):
+                lo = mid   # left clean → boundary is to the right
+            else:
+                hi = mid   # right clean → boundary is to the left
+
+        change_sample = (lo + hi) // 2
+        left  = _find(s0,            change_sample, depth + 1)
+        right = _find(change_sample, s1,            depth + 1)
+        return left + right
+
+    sections = _find(0, total_samples)
+    if not sections:
+        sections = [(0.0, detect_tempo(note_events, total_samples))]
+    return sections
+
+
 def quantize_tempo(bpm: float) -> tuple[float, int]:
     """Snap a BPM to the nearest TEMPO_BIN.
 

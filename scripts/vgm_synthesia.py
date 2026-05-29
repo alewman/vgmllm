@@ -37,7 +37,7 @@ _HERE = Path(__file__).resolve().parent
 _ROOT = _HERE.parent
 sys.path.insert(0, str(_ROOT / "src"))
 
-from genesis_music.music_analysis import detect_beat_phase, detect_meter, detect_tempo
+from genesis_music.music_analysis import detect_beat_phase, detect_meter, detect_tempo_map
 from genesis_music.vgm_parser import load_vgm
 from genesis_music.ym2612 import (
     CH_DAC, CH_FM_0, CH_PSG_0, CH_PSG_1, CH_PSG_2, CH_PSG_NOISE,
@@ -198,14 +198,36 @@ class _MixRenderer:
         return None
 
 
-def _parse_notes(vgm_path: Path) -> tuple[list[NoteRect], float, float, float, int, float]:
+def _parse_notes(
+    vgm_path: Path,
+    bpm_override: float | None = None,
+) -> tuple[list[NoteRect], float, float, list, int]:
+    from types import SimpleNamespace
     vgm   = load_vgm(vgm_path)
     notes, _ = decode_vgm(vgm)
     total_sec = vgm.header.total_samples / VGM_RATE
-    bpm = detect_tempo(notes, vgm.header.total_samples)
-    beat_period_samples = VGM_RATE * 60.0 / bpm
+
+    if bpm_override is not None:
+        raw_map = [(0.0, float(bpm_override))]
+    else:
+        raw_map = detect_tempo_map(notes, vgm.header.total_samples)
+
+    # Use the first section's BPM for meter detection
+    beat_period_samples = VGM_RATE * 60.0 / raw_map[0][1]
     beats_per_bar, _ = detect_meter(notes, vgm.header.total_samples, beat_period_samples)
-    beat_phase = detect_beat_phase(notes, vgm.header.total_samples, bpm)
+
+    # Detect beat phase independently per section
+    tempo_map: list[tuple[float, float, float]] = []
+    for i, (t_sec, bpm) in enumerate(raw_map):
+        s0 = int(t_sec * VGM_RATE)
+        s1 = (int(raw_map[i + 1][0] * VGM_RATE)
+              if i + 1 < len(raw_map) else vgm.header.total_samples)
+        sec_notes = [
+            SimpleNamespace(sample_on=n.sample_on - s0, channel=n.channel)
+            for n in notes if s0 <= n.sample_on < s1
+        ]
+        phase_rel = detect_beat_phase(sec_notes, s1 - s0, bpm)
+        tempo_map.append((t_sec, bpm, t_sec + phase_rel))
 
     # VGM loop point: jump-back target for seamless looping
     h = vgm.header
@@ -223,7 +245,7 @@ def _parse_notes(vgm_path: Path) -> tuple[list[NoteRect], float, float, float, i
         color = CHANNEL_COLORS.get(n.channel, (200, 200, 200))
         rects.append(NoteRect(n.channel, n.pitch, t_on, t_off, color, n.velocity))
 
-    return rects, total_sec, t_loop_start, bpm, beats_per_bar, beat_phase
+    return rects, total_sec, t_loop_start, tempo_map, beats_per_bar
 
 
 def _render_frame(
