@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import random
 import shutil
 import subprocess
 import sys
@@ -123,6 +124,21 @@ _OSC_MODE_SLOTS: tuple[tuple[str, str], ...] = (
 # Colour for an unlit LCD segment (dark, barely-there ghost).
 _LCD_DIM = (42, 42, 60)
 
+# ── particle system (Idea 3) ───────────────────────────────────────────────────
+_MAX_PARTICLES = 1200  # hard cap to keep export-mode fast
+
+
+class _Particle:
+    """Spark particle for the piano-key multi-channel overlap effect."""
+    __slots__ = ("x", "y", "vx", "vy", "r", "g", "b", "life")
+
+    def __init__(self, x: float, y: float, vx: float, vy: float,
+                 color: tuple) -> None:
+        self.x, self.y   = x, y
+        self.vx, self.vy = vx, vy
+        self.r, self.g, self.b = color
+        self.life = 1.0
+
 
 def _osc_cols(n_channels: int) -> int:
     """Dynamic column count: ≤4 → 2 cols, 5-9 → 3 cols, 10+ → 4 cols."""
@@ -172,6 +188,8 @@ def _draw_background(
     min_white:   int,
     piano_x0:    float,
     font_key,
+    particles:   list | None = None,  # mutable spark list (updated in-place)
+    dt:          float        = 0.0,  # seconds since last frame (for particles)
 ) -> None:
     """Draw the synthesia background: fill, falling note bars, and piano keyboard."""
     import pygame
@@ -194,6 +212,14 @@ def _draw_background(
         return piano_y - (ts - t) * px_per_sec
 
     # ── falling note bars ──────────────────────────────────────────────────────
+    # Pre-group pitched notes by pitch to detect multi-channel overlap (Idea 1).
+    _pitch_groups: dict[int, list] = {}
+    for nr in rects:
+        if nr.t_off < t_vis_start or nr.t_on > t_vis_end:
+            continue
+        if nr.pitch >= 0 and nr.channel != CH_DAC:
+            _pitch_groups.setdefault(nr.pitch, []).append(nr)
+
     for nr in rects:
         if nr.t_off < t_vis_start or nr.t_on > t_vis_end:
             continue
@@ -205,28 +231,88 @@ def _draw_background(
         y_top    = _time_to_y(clipped_off)
         bar_h    = max(y_bottom - y_top, 2)
 
-        r, g, b  = nr.color
+        r_c, g_c, b_c = nr.color
 
         if nr.pitch >= 0 and nr.channel != CH_DAC:
             rel_x, key_w, _ = _note_key_info(nr.pitch, min_white, white_w, black_w)
-            x = piano_x0 + rel_x
-            w = max(key_w - 2, 2)
-            pygame.draw.rect(surface, (r, g, b),
-                             pygame.Rect(int(x), int(y_top), int(w), int(bar_h)),
-                             border_radius=3)
-            if bar_h > 4:
-                pygame.draw.rect(surface,
-                                 (min(r+80, 255), min(g+80, 255), min(b+80, 255)),
-                                 pygame.Rect(int(x), int(y_top), int(w), 3),
+            bx = piano_x0 + rel_x
+            bw = max(key_w - 2, 2)
+
+            # Find every visible note at this pitch that overlaps this one in time.
+            same_time = [
+                o for o in _pitch_groups[nr.pitch]
+                if o.t_on < nr.t_off and o.t_off > nr.t_on
+            ]
+            N   = len(same_time)
+            idx = next(i for i, o in enumerate(same_time) if o is nr)
+
+            if N == 1:
+                # ── single channel: normal rounded bar ─────────────────────────
+                pygame.draw.rect(surface, (r_c, g_c, b_c),
+                                 pygame.Rect(int(bx), int(y_top), int(bw), int(bar_h)),
                                  border_radius=3)
+                if bar_h > 4:
+                    pygame.draw.rect(surface,
+                                     (min(r_c+80,255), min(g_c+80,255), min(b_c+80,255)),
+                                     pygame.Rect(int(bx), int(y_top), int(bw), 3),
+                                     border_radius=3)
+            else:
+                # ── multi-channel: wide solid bands with narrow blend zones ────────
+                # 32 internal px per channel; 5-px smoothstep blend per seam (≈16%).
+                # Drawn once (by idx=0); subsequent overlap notes skip.
+                if idx == 0:
+                    _S, _B = 32, 5
+                    grad_s = pygame.Surface((N * _S, 1))
+                    for ci, o in enumerate(same_time):
+                        bs = ci * _S
+                        bl = _B if ci > 0     else 0
+                        br = _B if ci < N - 1 else 0
+                        grad_s.fill(o.color, (bs + bl, 0, _S - bl - br, 1))
+                        for px in range(bl):
+                            tb = (px + 0.5) / bl
+                            tb = tb * tb * (3.0 - 2.0 * tb)  # smoothstep
+                            pc = same_time[ci - 1].color
+                            grad_s.set_at(
+                                (bs + px, 0),
+                                tuple(int(pc[k] + (o.color[k] - pc[k]) * tb)
+                                      for k in range(3)),
+                            )
+                        for px in range(br):
+                            tb = (px + 0.5) / br
+                            tb = tb * tb * (3.0 - 2.0 * tb)  # smoothstep
+                            nc = same_time[ci + 1].color
+                            grad_s.set_at(
+                                (bs + _S - br + px, 0),
+                                tuple(int(o.color[k] + (nc[k] - o.color[k]) * tb)
+                                      for k in range(3)),
+                            )
+                    surface.blit(
+                        pygame.transform.smoothscale(grad_s, (int(bw), int(bar_h))),
+                        (int(bx), int(y_top)),
+                    )
+                    # Additive glow strip at the leading (top) edge
+                    if bar_h > 3:
+                        mixed = tuple(
+                            min(255, sum(o.color[i] for o in same_time))
+                            for i in range(3)
+                        )
+                        glow_h = min(4, int(bar_h))
+                        glow_s = pygame.Surface((int(bw), glow_h), pygame.SRCALPHA)
+                        glow_s.fill((*mixed, 220))
+                        surface.blit(glow_s, (int(bx), int(y_top)))
+                # else: skip — gradient already drawn by the idx=0 note
+
         else:
-            # DAC / noise → left strip
-            strip_slot = ([CH_DAC, CH_PSG_NOISE].index(nr.channel)
-                          if nr.channel in (CH_DAC, CH_PSG_NOISE) else 0)
+            # DAC / PSG_NOISE → left strip.
+            # PSG tone channels with pitch=-1 (period=0/mute) are discarded here
+            # so they don't pollute the DAC strip.
+            if nr.channel not in (CH_DAC, CH_PSG_NOISE):
+                continue
+            strip_slot = [CH_DAC, CH_PSG_NOISE].index(nr.channel)
             slot_w = dac_strip_w // 2
             x      = strip_slot * slot_w
             w      = slot_w - 2
-            pygame.draw.rect(surface, (r, g, b),
+            pygame.draw.rect(surface, (r_c, g_c, b_c),
                              pygame.Rect(int(x), int(y_top), int(w), int(bar_h)),
                              border_radius=2)
 
@@ -236,12 +322,49 @@ def _draw_background(
     pygame.draw.line(surface, (80, 80, 130),
                      (0, piano_y), (screen_w, piano_y), 2)
 
-    active_pitches: set[int]    = set()
-    active_ch:      dict[int, int] = {}
+    active_pitches: set[int]        = set()
+    active_ch:      dict[int, list] = {}   # pitch → [channel_ids]  (multi-aware)
+    active_vel:     dict[int, dict] = {}   # pitch → {channel_id → velocity 0-15}
     for nr in rects:
         if nr.t_on <= t < nr.t_off and nr.pitch >= 0:
             active_pitches.add(nr.pitch)
-            active_ch[nr.pitch] = nr.channel
+            active_ch.setdefault(nr.pitch, []).append(nr.channel)
+            active_vel.setdefault(nr.pitch, {})[nr.channel] = nr.velocity
+
+    def _key_color(ch_ids: list, boost: int, fallback) -> tuple:
+        """Additive light-mix piano key colour: more channels → brighter key."""
+        return (
+            min(255, sum(CHANNEL_COLORS.get(c, (150,150,150))[0] for c in ch_ids) + boost),
+            min(255, sum(CHANNEL_COLORS.get(c, (150,150,150))[1] for c in ch_ids) + boost),
+            min(255, sum(CHANNEL_COLORS.get(c, (150,150,150))[2] for c in ch_ids) + boost),
+        )
+
+    def _key_gradient(ch_ids: list, boost: int,
+                      kx: int, ky: int, kw: int, kh: int) -> None:
+        """Wide-band gradient across a piano key for multi-channel notes."""
+        N_k      = len(ch_ids)
+        _S, _B   = 32, 5
+        gs       = pygame.Surface((N_k * _S, 1))
+        for ci, ch_id in enumerate(ch_ids):
+            base = CHANNEL_COLORS.get(ch_id, (200, 200, 200))
+            lit  = tuple(min(255, c + boost) for c in base)
+            bs   = ci * _S
+            bl   = _B if ci > 0       else 0
+            br   = _B if ci < N_k - 1 else 0
+            gs.fill(lit, (bs + bl, 0, _S - bl - br, 1))
+            for px in range(bl):
+                tb = (px + 0.5) / bl; tb = tb * tb * (3.0 - 2.0 * tb)
+                pc = tuple(min(255, c + boost)
+                           for c in CHANNEL_COLORS.get(ch_ids[ci - 1], (200, 200, 200)))
+                gs.set_at((bs + px, 0),
+                          tuple(int(pc[k] + (lit[k] - pc[k]) * tb) for k in range(3)))
+            for px in range(br):
+                tb = (px + 0.5) / br; tb = tb * tb * (3.0 - 2.0 * tb)
+                nc = tuple(min(255, c + boost)
+                           for c in CHANNEL_COLORS.get(ch_ids[ci + 1], (200, 200, 200)))
+                gs.set_at((bs + _S - br + px, 0),
+                          tuple(int(lit[k] + (nc[k] - lit[k]) * tb) for k in range(3)))
+        surface.blit(pygame.transform.smoothscale(gs, (kw, kh)), (kx, ky))
 
     white_key_h = piano_h - 4
     black_key_h = int(white_key_h * 0.60)
@@ -255,16 +378,31 @@ def _draw_background(
         if midi is None:
             continue
         if midi in active_pitches:
-            base = CHANNEL_COLORS.get(active_ch[midi], WHITE_KEY_CLR)
-            color = tuple(min(c + 60, 255) for c in base)
+            wch = active_ch[midi]
+            if len(wch) > 1:
+                _key_gradient(wch, 60, x, piano_y + 2, w, white_key_h - 2)
+            else:
+                pygame.draw.rect(surface, _key_color(wch, 60, WHITE_KEY_CLR),
+                                 pygame.Rect(x, piano_y + 2, w, white_key_h - 2),
+                                 border_radius=2)
         else:
-            color = WHITE_KEY_CLR
-        pygame.draw.rect(surface, color,
-                         pygame.Rect(x, piano_y + 2, w, white_key_h - 2),
-                         border_radius=2)
+            pygame.draw.rect(surface, WHITE_KEY_CLR,
+                             pygame.Rect(x, piano_y + 2, w, white_key_h - 2),
+                             border_radius=2)
         pygame.draw.rect(surface, (80, 80, 100),
                          pygame.Rect(x, piano_y + 2, w, white_key_h - 2),
                          width=1, border_radius=2)
+        # Middle C marker: small triangle tab at the bottom of MIDI 60 (C4)
+        if midi == 60 and pitch_min <= 60 <= pitch_max:
+            tab_cx = x + w // 2
+            tab_b  = piano_y + white_key_h - 1   # bottom of key area
+            tab_h  = min(7, white_key_h // 5)
+            pygame.draw.polygon(
+                surface, (80, 80, 110),   # dark blue-grey, readable on white
+                [(tab_cx - tab_h, tab_b),
+                 (tab_cx + tab_h, tab_b),
+                 (tab_cx,         tab_b - tab_h)],
+            )
 
     # Black keys
     for wi in range(n_whites):
@@ -273,16 +411,20 @@ def _draw_background(
             continue
         midi_black = midi_white + 1
         if midi_black <= pitch_max and not _NOTE_IS_WHITE[midi_black % 12]:
+            bkx = int(piano_x0 + wi * white_w + white_w * 0.55)
+            bkw = int(black_w)
             if midi_black in active_pitches:
-                base  = CHANNEL_COLORS.get(active_ch[midi_black], BLACK_KEY_CLR)
-                color = tuple(min(c + 40, 255) for c in base)
+                bch = active_ch[midi_black]
+                if len(bch) > 1:
+                    _key_gradient(bch, 40, bkx, piano_y + 2, bkw, black_key_h)
+                else:
+                    pygame.draw.rect(surface, _key_color(bch, 40, BLACK_KEY_CLR),
+                                     pygame.Rect(bkx, piano_y + 2, bkw, black_key_h),
+                                     border_radius=2)
             else:
-                color = BLACK_KEY_CLR
-            bx = int(piano_x0 + wi * white_w + white_w * 0.55)
-            bw = int(black_w)
-            pygame.draw.rect(surface, color,
-                             pygame.Rect(bx, piano_y + 2, bw, black_key_h),
-                             border_radius=2)
+                pygame.draw.rect(surface, BLACK_KEY_CLR,
+                                 pygame.Rect(bkx, piano_y + 2, bkw, black_key_h),
+                                 border_radius=2)
 
     # ── DAC / Noise strip labels ───────────────────────────────────────────────
     if dac_strip_w > 0:
@@ -294,6 +436,68 @@ def _draw_background(
             if font_key:
                 txt = font_key.render(label, True, (r2, g2, b2))
                 surface.blit(txt, (i * slot_w + 2, top_y + 4))
+
+    # ── particle sparks — update, spawn, draw (Idea 3) ────────────────────────
+    if particles is not None and dt > 0.0:
+        # Move, apply gravity, age, and prune existing sparks
+        survivors = []
+        for p in particles:
+            p.life -= dt * 0.7   # slower fade → long arcs
+            if p.life <= 0.0:
+                continue
+            p.x  += p.vx * dt
+            p.y  += p.vy * dt
+            p.vy += 130.0 * dt  # gravity
+            survivors.append(p)
+        particles[:] = survivors
+
+        # Spawn new sparks from each actively-held pitch × channel
+        if len(particles) < _MAX_PARTICLES:
+            for pitch, ch_ids in active_ch.items():
+                rel_x, key_w, _ = _note_key_info(pitch, min_white, white_w, black_w)
+                kx = piano_x0 + rel_x + key_w * 0.5
+                ky = float(piano_y)
+                for ch_id in ch_ids:
+                    # velocity 0–15 → normalised 0.0–1.0
+                    # louder notes fire more sparks, faster, over a wider spread
+                    vel_norm = active_vel.get(pitch, {}).get(ch_id, 15) / 15.0
+                    # spawn probability scales with volume: vel=0 → 20%, vel=15 → 80%
+                    if random.random() > (0.20 + 0.60 * vel_norm):
+                        continue
+                    base_col = CHANNEL_COLORS.get(ch_id, (200, 200, 200))
+                    speed    = 0.35 + 0.65 * vel_norm   # 35–100% of max speed
+                    count    = max(1, round(vel_norm * 4))  # 1–4 sparks
+                    for _ in range(random.randint(count, count + 1)):
+                        if len(particles) >= _MAX_PARTICLES:
+                            break
+                        particles.append(_Particle(
+                            kx + random.uniform(-key_w * 0.5 * vel_norm,
+                                                 key_w * 0.5 * vel_norm),
+                            ky,
+                            random.uniform(-50.0 * speed,  50.0 * speed),
+                            random.uniform(-170.0 * speed, -50.0 * speed),
+                            base_col,
+                        ))
+
+        # Draw: outer body + bright core
+        for p in particles:
+            fade       = p.life
+            r_p        = int(p.r * fade)
+            g_p        = int(p.g * fade)
+            b_p        = int(p.b * fade)
+            size       = max(2, int(fade * 4))
+            cx_i, cy_i = int(p.x), int(p.y)
+            # soft outer halo
+            pygame.draw.circle(surface, (r_p // 2, g_p // 2, b_p // 2),
+                               (cx_i, cy_i), size + 1)
+            # main body
+            pygame.draw.circle(surface, (r_p, g_p, b_p), (cx_i, cy_i), size)
+            # bright core
+            pygame.draw.circle(
+                surface,
+                (min(255, r_p + 110), min(255, g_p + 110), min(255, b_p + 110)),
+                (cx_i, cy_i), max(1, size - 1),
+            )
 
     # ── playhead marker ────────────────────────────────────────────────────────
     pygame.draw.line(surface, (200, 200, 255),
@@ -480,6 +684,8 @@ def _render_combined(
     font_hdr, font_mono, font_sm, font_key,
     no_osc: bool = False,
     channel_modes: dict | None = None,
+    particles: list | None = None,
+    dt: float = 0.0,
 ) -> None:
     """Composite one complete frame onto `surface`."""
     top_y = HEADER_H  # the falling zone starts here
@@ -490,6 +696,7 @@ def _render_combined(
         screen_w, screen_h, piano_h, top_y,
         dac_strip_w, pitch_min, pitch_max,
         white_w, black_w, min_white, piano_x0, font_key,
+        particles=particles, dt=dt,
     )
 
     # 2 – oscilloscope grid overlay (behind header, in front of falling notes)
@@ -713,6 +920,9 @@ def _interactive(
         print(f"Loop point: {t_loop_start:.2f}s (loop body {total_sec - t_loop_start:.2f}s)")
     print("Controls: SPACE=pause  LEFT/RIGHT=seek 5s  Q/ESC=quit")
 
+    particles: list = []   # spark particles for Idea 3
+    spf = 1.0 / args.fps
+
     while True:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -774,6 +984,8 @@ def _interactive(
             font_hdr, font_mono, font_sm, font_key,
             no_osc=args.no_osc,
             channel_modes=channel_modes,
+            particles=particles,
+            dt=spf,
         )
 
         pygame.display.flip()
@@ -878,6 +1090,8 @@ def _export_mp4(
     t0 = _time.time()
     print(f"Exporting {total_frames} frames @ {args.fps}fps → {out_path}")
 
+    particles: list = []   # spark particles for Idea 3
+
     try:
         for frame_i in range(total_frames):
             t          = -args.lookahead / 2 + frame_i * spf
@@ -894,6 +1108,8 @@ def _export_mp4(
                 font_hdr, font_mono, font_sm, font_key,
                 no_osc=args.no_osc,
                 channel_modes=channel_modes,
+                particles=particles,
+                dt=spf,
             )
 
             raw = pygame.surfarray.array3d(surface)

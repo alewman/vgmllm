@@ -100,11 +100,12 @@ def _note_key_info(midi: int, min_white: int, white_w: float, black_w: float
 
 @dataclass
 class NoteRect:
-    channel: int
-    pitch:   int            # -1 for DAC
-    t_on:    float          # seconds
-    t_off:   float          # seconds
-    color:   tuple[int,int,int]
+    channel:  int
+    pitch:    int            # -1 for DAC
+    t_on:     float          # seconds
+    t_off:    float          # seconds
+    color:    tuple[int,int,int]
+    velocity: int = 15       # 0–15 (from FM operator TL / PSG attenuation)
 
 
 # ── VGMPlay mix renderer (minimal — full-mix only) ───────────────────────────
@@ -215,7 +216,7 @@ def _parse_notes(vgm_path: Path) -> tuple[list[NoteRect], float, float]:
         # clamp duration
         t_off = max(t_off, t_on + 0.04)
         color = CHANNEL_COLORS.get(n.channel, (200, 200, 200))
-        rects.append(NoteRect(n.channel, n.pitch, t_on, t_off, color))
+        rects.append(NoteRect(n.channel, n.pitch, t_on, t_off, color, n.velocity))
 
     return rects, total_sec, t_loop_start
 
