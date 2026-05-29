@@ -286,48 +286,48 @@ def _draw_background(
             else:
                 # ── multi-channel: wide solid bands with narrow blend zones ────────
                 # 32 internal px per channel; 5-px smoothstep blend per seam (≈16%).
-                # Drawn once (by idx=0); subsequent overlap notes skip.
-                if idx == 0:
-                    _S, _B = 32, 5
-                    grad_s = pygame.Surface((N * _S, 1))
-                    for ci, o in enumerate(same_time):
-                        bs = ci * _S
-                        bl = _B if ci > 0     else 0
-                        br = _B if ci < N - 1 else 0
-                        grad_s.fill(o.color, (bs + bl, 0, _S - bl - br, 1))
-                        for px in range(bl):
-                            tb = (px + 0.5) / bl
-                            tb = tb * tb * (3.0 - 2.0 * tb)  # smoothstep
-                            pc = same_time[ci - 1].color
-                            grad_s.set_at(
-                                (bs + px, 0),
-                                tuple(int(pc[k] + (o.color[k] - pc[k]) * tb)
-                                      for k in range(3)),
-                            )
-                        for px in range(br):
-                            tb = (px + 0.5) / br
-                            tb = tb * tb * (3.0 - 2.0 * tb)  # smoothstep
-                            nc = same_time[ci + 1].color
-                            grad_s.set_at(
-                                (bs + _S - br + px, 0),
-                                tuple(int(o.color[k] + (nc[k] - o.color[k]) * tb)
-                                      for k in range(3)),
-                            )
-                    surface.blit(
-                        pygame.transform.smoothscale(grad_s, (int(bw), int(bar_h))),
-                        (int(bx), int(y_top)),
-                    )
-                    # Additive glow strip at the leading (top) edge
-                    if bar_h > 3:
-                        mixed = tuple(
-                            min(255, sum(o.color[i] for o in same_time))
-                            for i in range(3)
+                # Every note draws its OWN time rect with the shared gradient so
+                # notes that start/end at different times are all fully visible.
+                # (The overlapping region is drawn twice but produces identical pixels.)
+                _S, _B = 32, 5
+                grad_s = pygame.Surface((N * _S, 1))
+                for ci, o in enumerate(same_time):
+                    bs = ci * _S
+                    bl = _B if ci > 0     else 0
+                    br = _B if ci < N - 1 else 0
+                    grad_s.fill(o.color, (bs + bl, 0, _S - bl - br, 1))
+                    for px in range(bl):
+                        tb = (px + 0.5) / bl
+                        tb = tb * tb * (3.0 - 2.0 * tb)  # smoothstep
+                        pc = same_time[ci - 1].color
+                        grad_s.set_at(
+                            (bs + px, 0),
+                            tuple(int(pc[k] + (o.color[k] - pc[k]) * tb)
+                                  for k in range(3)),
                         )
-                        glow_h = min(4, int(bar_h))
-                        glow_s = pygame.Surface((int(bw), glow_h), pygame.SRCALPHA)
-                        glow_s.fill((*mixed, 220))
-                        surface.blit(glow_s, (int(bx), int(y_top)))
-                # else: skip — gradient already drawn by the idx=0 note
+                    for px in range(br):
+                        tb = (px + 0.5) / br
+                        tb = tb * tb * (3.0 - 2.0 * tb)  # smoothstep
+                        nc = same_time[ci + 1].color
+                        grad_s.set_at(
+                            (bs + _S - br + px, 0),
+                            tuple(int(o.color[k] + (nc[k] - o.color[k]) * tb)
+                                  for k in range(3)),
+                        )
+                surface.blit(
+                    pygame.transform.smoothscale(grad_s, (int(bw), int(bar_h))),
+                    (int(bx), int(y_top)),
+                )
+                # Additive glow strip at the leading (top) edge of this note
+                if bar_h > 3:
+                    mixed = tuple(
+                        min(255, sum(o.color[i] for o in same_time))
+                        for i in range(3)
+                    )
+                    glow_h = min(4, int(bar_h))
+                    glow_s = pygame.Surface((int(bw), glow_h), pygame.SRCALPHA)
+                    glow_s.fill((*mixed, 220))
+                    surface.blit(glow_s, (int(bx), int(y_top)))
 
         else:
             # DAC / PSG_NOISE → left strip.
